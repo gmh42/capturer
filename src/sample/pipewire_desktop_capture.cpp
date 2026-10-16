@@ -18,7 +18,11 @@
 #include <pipewire/pipewire.h>
 #include <pipewire/stream.h>
 
+#include <dirent.h>
+#include <drm_fourcc.h>
+
 #include <spa/buffer/buffer.h>
+#include <spa/pod/parser.h>
 #include <spa/param/buffers.h>
 #include <spa/param/format.h>
 #include <spa/param/param.h>
@@ -33,8 +37,6 @@ namespace {
 // Bound the accepted PipeWire format range while covering current high-resolution, high-refresh displays.
 constexpr std::uint32_t kMaximumCaptureDimension = 16384;
 constexpr std::uint32_t kMaximumCaptureFrameRate = 240;
-constexpr std::uint32_t kSupportedCaptureDataTypes =
-    (1U << SPA_DATA_DmaBuf) | (1U << SPA_DATA_MemFd) | (1U << SPA_DATA_MemPtr);
 
 std::string make_error_message(const char* what, int code) {
     return std::string(what) + ": " + std::strerror(code < 0 ? -code : code);
@@ -88,51 +90,15 @@ struct PipeWireDesktopCaptureSource::Impl {
 
         std::uint8_t pod_buffer[4096];
         spa_pod_builder pod_builder = SPA_POD_BUILDER_INIT(pod_buffer, sizeof(pod_buffer));
-        const spa_rectangle preferred_size{
-            static_cast<std::uint32_t>(config.width),
-            static_cast<std::uint32_t>(config.height)};
-        const spa_rectangle minimum_size{1, 1};
-        const spa_rectangle maximum_size{kMaximumCaptureDimension, kMaximumCaptureDimension};
-        const spa_fraction preferred_max_framerate{
-            config.framerate_numerator,
-            config.framerate_denominator};
-        const spa_fraction minimum_max_framerate{1, 1};
-        const spa_fraction maximum_max_framerate{kMaximumCaptureFrameRate, 1};
-        const spa_pod* format = static_cast<const spa_pod*>(spa_pod_builder_add_object(
-            &pod_builder,
-            SPA_TYPE_OBJECT_Format,
-            SPA_PARAM_EnumFormat,
-            SPA_FORMAT_mediaType,
-            SPA_POD_Id(SPA_MEDIA_TYPE_video),
-            SPA_FORMAT_mediaSubtype,
-            SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-            SPA_FORMAT_VIDEO_format,
-            SPA_POD_CHOICE_ENUM_Id(
-                4,
-                SPA_VIDEO_FORMAT_BGRA,
-                SPA_VIDEO_FORMAT_BGRx,
-                SPA_VIDEO_FORMAT_RGBA,
-                SPA_VIDEO_FORMAT_RGBx),
-            SPA_FORMAT_VIDEO_size,
-            SPA_POD_CHOICE_RANGE_Rectangle(&preferred_size, &minimum_size, &maximum_size),
-            SPA_FORMAT_VIDEO_maxFramerate,
-            SPA_POD_CHOICE_RANGE_Fraction(
-                &preferred_max_framerate,
-                &minimum_max_framerate,
-                &maximum_max_framerate)));
-        if (!format || spa_pod_builder_corrupted(&pod_builder)) {
+        const spa_pod* params[2];
+        std::uint32_t param_count = 0;
+        if (dma_buf_supported()) {
+            params[param_count++] = build_format(pod_builder, true);
+        }
+        params[param_count++] = build_format(pod_builder, false);
+        if (spa_pod_builder_corrupted(&pod_builder)) {
             throw std::runtime_error("failed to build PipeWire video format parameters");
         }
-        const spa_pod* buffers = static_cast<const spa_pod*>(spa_pod_builder_add_object(
-            &pod_builder,
-            SPA_TYPE_OBJECT_ParamBuffers,
-            SPA_PARAM_Buffers,
-            SPA_PARAM_BUFFERS_dataType,
-            SPA_POD_CHOICE_FLAGS_Int(kSupportedCaptureDataTypes)));
-        if (!buffers || spa_pod_builder_corrupted(&pod_builder)) {
-            throw std::runtime_error("failed to build PipeWire buffer parameters");
-        }
-        const spa_pod* params[] = {format, buffers};
 
         const int connect_result = pw_stream_connect(
             stream,
@@ -140,7 +106,7 @@ struct PipeWireDesktopCaptureSource::Impl {
             config.target_node_id,
             static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_DONT_RECONNECT | PW_STREAM_FLAG_MAP_BUFFERS),
             params,
-            2);
+            param_count);
         if (connect_result < 0) {
             throw std::runtime_error(make_error_message("failed to connect PipeWire stream", connect_result));
         }
@@ -148,6 +114,70 @@ struct PipeWireDesktopCaptureSource::Impl {
         if (pw_stream_set_active(stream, true) < 0) {
             throw std::runtime_error("failed to activate PipeWire stream");
         }
+    }
+
+    // A VM or container without a DRM render node cannot import dma-bufs, so only offer CPU formats there.
+    bool dma_buf_supported() const {
+        return config.allow_dma_buf && access("/dev/dri", F_OK) == 0 && has_render_node();
+    }
+
+    static bool has_render_node() {
+        DIR* dir = opendir("/dev/dri");
+        if (!dir) {
+            return false;
+        }
+        bool found = false;
+        while (const dirent* entry = readdir(dir)) {
+            if (std::strncmp(entry->d_name, "renderD", 7) == 0) {
+                found = true;
+                break;
+            }
+        }
+        closedir(dir);
+        return found;
+    }
+
+    const spa_pod* build_format(spa_pod_builder& builder, bool with_modifier) const {
+        const spa_rectangle preferred_size{
+            static_cast<std::uint32_t>(config.width),
+            static_cast<std::uint32_t>(config.height)};
+        const spa_rectangle minimum_size{1, 1};
+        const spa_rectangle maximum_size{kMaximumCaptureDimension, kMaximumCaptureDimension};
+        const spa_fraction preferred_max_framerate{config.framerate_numerator, config.framerate_denominator};
+        const spa_fraction minimum_max_framerate{1, 1};
+        const spa_fraction maximum_max_framerate{kMaximumCaptureFrameRate, 1};
+
+        spa_pod_frame object_frame;
+        spa_pod_builder_push_object(&builder, &object_frame, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
+        spa_pod_builder_add(
+            &builder,
+            SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+            SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+            SPA_FORMAT_VIDEO_format,
+            SPA_POD_CHOICE_ENUM_Id(
+                5,
+                SPA_VIDEO_FORMAT_BGRA,
+                SPA_VIDEO_FORMAT_BGRA,
+                SPA_VIDEO_FORMAT_BGRx,
+                SPA_VIDEO_FORMAT_RGBA,
+                SPA_VIDEO_FORMAT_RGBx),
+            SPA_FORMAT_VIDEO_size,
+            SPA_POD_CHOICE_RANGE_Rectangle(&preferred_size, &minimum_size, &maximum_size),
+            SPA_FORMAT_VIDEO_maxFramerate,
+            SPA_POD_CHOICE_RANGE_Fraction(&preferred_max_framerate, &minimum_max_framerate, &maximum_max_framerate),
+            0);
+        if (with_modifier) {
+            // The first choice entry is the default; the rest are the alternatives.
+            const std::uint64_t modifiers[] = {DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_MOD_INVALID};
+            spa_pod_frame choice_frame;
+            spa_pod_builder_prop(&builder, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY);
+            spa_pod_builder_push_choice(&builder, &choice_frame, SPA_CHOICE_Enum, 0);
+            for (const std::uint64_t modifier : modifiers) {
+                spa_pod_builder_long(&builder, static_cast<std::int64_t>(modifier));
+            }
+            spa_pod_builder_pop(&builder, &choice_frame);
+        }
+        return static_cast<const spa_pod*>(spa_pod_builder_pop(&builder, &object_frame));
     }
 
     ~Impl() {
@@ -227,15 +257,16 @@ struct PipeWireDesktopCaptureSource::Impl {
             return frame;
         }
 
-        frame.pixels.resize(valid_size);
-
+        // assign() copies straight into the vector without zero-filling it first.
         if (data.data != nullptr) {
-            std::memcpy(frame.pixels.data(), data.data, std::min(valid_size, static_cast<std::size_t>(data.maxsize)));
+            const auto* source = static_cast<const std::uint8_t*>(data.data);
+            frame.pixels.assign(source, source + std::min(valid_size, static_cast<std::size_t>(data.maxsize)));
         } else if (data.fd >= 0 && (data.type == SPA_DATA_MemFd || data.type == SPA_DATA_Invalid)) {
             const std::size_t map_size = data.maxsize > 0 ? static_cast<std::size_t>(data.maxsize) : valid_size;
             void* mapped = mmap(nullptr, map_size, PROT_READ, MAP_SHARED, static_cast<int>(data.fd), static_cast<off_t>(data.mapoffset));
             if (mapped != MAP_FAILED) {
-                std::memcpy(frame.pixels.data(), mapped, std::min(valid_size, map_size));
+                const auto* source = static_cast<const std::uint8_t*>(mapped);
+                frame.pixels.assign(source, source + std::min(valid_size, map_size));
                 munmap(mapped, map_size);
             }
         }
@@ -273,9 +304,27 @@ struct PipeWireDesktopCaptureSource::Impl {
         }
 
         struct spa_video_info info{};
-        if (spa_format_video_parse(param, &info) == 0 && info.media_subtype == SPA_MEDIA_SUBTYPE_raw) {
-            self->config.width = std::max<std::size_t>(1, info.info.raw.size.width);
-            self->config.height = std::max<std::size_t>(1, info.info.raw.size.height);
+        if (spa_format_video_parse(param, &info) != 0 || info.media_subtype != SPA_MEDIA_SUBTYPE_raw) {
+            return;
+        }
+        self->config.width = std::max<std::size_t>(1, info.info.raw.size.width);
+        self->config.height = std::max<std::size_t>(1, info.info.raw.size.height);
+
+        // A modifier in the negotiated format means the producer chose dma-buf.
+        const bool use_dma_buf = spa_pod_find_prop(param, nullptr, SPA_FORMAT_VIDEO_modifier) != nullptr;
+        const std::int32_t data_types = use_dma_buf
+            ? (1 << SPA_DATA_DmaBuf)
+            : ((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr));
+        std::uint8_t pod_buffer[256];
+        spa_pod_builder builder = SPA_POD_BUILDER_INIT(pod_buffer, sizeof(pod_buffer));
+        const spa_pod* buffers = static_cast<const spa_pod*>(spa_pod_builder_add_object(
+            &builder,
+            SPA_TYPE_OBJECT_ParamBuffers,
+            SPA_PARAM_Buffers,
+            SPA_PARAM_BUFFERS_dataType,
+            SPA_POD_Int(data_types)));
+        if (buffers) {
+            pw_stream_update_params(self->stream, &buffers, 1);
         }
     }
 

@@ -221,6 +221,18 @@ PipeWireDesktopCaptureConfig open_wayland_portal_capture() {
     GVariant* stream = g_variant_get_child_value(streams, 0);
     guint32 node_id = 0;
     g_variant_get_child(stream, 0, "u", &node_id);
+    // The portal reports the selected monitor's resolution as the "size" property, a (ii) tuple.
+    gint stream_width = 0;
+    gint stream_height = 0;
+    GVariant* stream_properties = g_variant_get_child_value(stream, 1);
+    GVariant* size_value = take_result(stream_properties, "size");
+    if (size_value && g_variant_is_of_type(size_value, G_VARIANT_TYPE("(ii)"))) {
+        g_variant_get(size_value, "(ii)", &stream_width, &stream_height);
+    }
+    if (size_value) {
+        g_variant_unref(size_value);
+    }
+    g_variant_unref(stream_properties);
     g_variant_unref(stream);
     g_variant_unref(streams);
     g_variant_unref(start_results);
@@ -259,6 +271,10 @@ PipeWireDesktopCaptureConfig open_wayland_portal_capture() {
     PipeWireDesktopCaptureConfig config;
     config.pipewire_fd = pipewire_fd;
     config.target_node_id = node_id;
+    if (stream_width > 0 && stream_height > 0) {
+        config.width = static_cast<std::size_t>(stream_width);
+        config.height = static_cast<std::size_t>(stream_height);
+    }
     config.portal_connection = std::shared_ptr<void>(
         connection,
         [](void* value) { g_object_unref(static_cast<GDBusConnection*>(value)); });

@@ -59,8 +59,9 @@ struct PipeWireDesktopCaptureConfig {
     std::shared_ptr<void> portal_connection;
     std::size_t width = 1920;
     std::size_t height = 1080;
-    std::uint32_t framerate_numerator = 30;
+    std::uint32_t framerate_numerator = 60;
     std::uint32_t framerate_denominator = 1;
+    bool allow_dma_buf = true;
 };
 
 class PipeWireDesktopCaptureSource final : public DesktopCaptureSource {
