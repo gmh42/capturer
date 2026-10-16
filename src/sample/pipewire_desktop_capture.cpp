@@ -3,7 +3,9 @@
 #if HAVE_PIPEWIRE
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -16,12 +18,23 @@
 #include <pipewire/pipewire.h>
 #include <pipewire/stream.h>
 
+#include <spa/buffer/buffer.h>
+#include <spa/param/buffers.h>
+#include <spa/param/format.h>
+#include <spa/param/param.h>
 #include <spa/param/format-utils.h>
 #include <spa/param/video/format-utils.h>
+#include <spa/pod/builder.h>
 
 namespace capturer::sample {
 
 namespace {
+
+// Bound the accepted PipeWire format range while covering current high-resolution, high-refresh displays.
+constexpr std::uint32_t kMaximumCaptureDimension = 16384;
+constexpr std::uint32_t kMaximumCaptureFrameRate = 240;
+constexpr std::uint32_t kSupportedCaptureDataTypes =
+    (1U << SPA_DATA_DmaBuf) | (1U << SPA_DATA_MemFd) | (1U << SPA_DATA_MemPtr);
 
 std::string make_error_message(const char* what, int code) {
     return std::string(what) + ": " + std::strerror(code < 0 ? -code : code);
@@ -73,13 +86,61 @@ struct PipeWireDesktopCaptureSource::Impl {
 
         pw_stream_add_listener(stream, &listener, &stream_events, this);
 
+        std::uint8_t pod_buffer[4096];
+        spa_pod_builder pod_builder = SPA_POD_BUILDER_INIT(pod_buffer, sizeof(pod_buffer));
+        const spa_rectangle preferred_size{
+            static_cast<std::uint32_t>(config.width),
+            static_cast<std::uint32_t>(config.height)};
+        const spa_rectangle minimum_size{1, 1};
+        const spa_rectangle maximum_size{kMaximumCaptureDimension, kMaximumCaptureDimension};
+        const spa_fraction preferred_max_framerate{
+            config.framerate_numerator,
+            config.framerate_denominator};
+        const spa_fraction minimum_max_framerate{1, 1};
+        const spa_fraction maximum_max_framerate{kMaximumCaptureFrameRate, 1};
+        const spa_pod* format = static_cast<const spa_pod*>(spa_pod_builder_add_object(
+            &pod_builder,
+            SPA_TYPE_OBJECT_Format,
+            SPA_PARAM_EnumFormat,
+            SPA_FORMAT_mediaType,
+            SPA_POD_Id(SPA_MEDIA_TYPE_video),
+            SPA_FORMAT_mediaSubtype,
+            SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+            SPA_FORMAT_VIDEO_format,
+            SPA_POD_CHOICE_ENUM_Id(
+                4,
+                SPA_VIDEO_FORMAT_BGRA,
+                SPA_VIDEO_FORMAT_BGRx,
+                SPA_VIDEO_FORMAT_RGBA,
+                SPA_VIDEO_FORMAT_RGBx),
+            SPA_FORMAT_VIDEO_size,
+            SPA_POD_CHOICE_RANGE_Rectangle(&preferred_size, &minimum_size, &maximum_size),
+            SPA_FORMAT_VIDEO_maxFramerate,
+            SPA_POD_CHOICE_RANGE_Fraction(
+                &preferred_max_framerate,
+                &minimum_max_framerate,
+                &maximum_max_framerate)));
+        if (!format || spa_pod_builder_corrupted(&pod_builder)) {
+            throw std::runtime_error("failed to build PipeWire video format parameters");
+        }
+        const spa_pod* buffers = static_cast<const spa_pod*>(spa_pod_builder_add_object(
+            &pod_builder,
+            SPA_TYPE_OBJECT_ParamBuffers,
+            SPA_PARAM_Buffers,
+            SPA_PARAM_BUFFERS_dataType,
+            SPA_POD_CHOICE_FLAGS_Int(kSupportedCaptureDataTypes)));
+        if (!buffers || spa_pod_builder_corrupted(&pod_builder)) {
+            throw std::runtime_error("failed to build PipeWire buffer parameters");
+        }
+        const spa_pod* params[] = {format, buffers};
+
         const int connect_result = pw_stream_connect(
             stream,
             PW_DIRECTION_INPUT,
             config.target_node_id,
             static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_DONT_RECONNECT | PW_STREAM_FLAG_MAP_BUFFERS),
-            nullptr,
-            0);
+            params,
+            2);
         if (connect_result < 0) {
             throw std::runtime_error(make_error_message("failed to connect PipeWire stream", connect_result));
         }
@@ -112,15 +173,14 @@ struct PipeWireDesktopCaptureSource::Impl {
         }
     }
 
-    DesktopFrame wait_for_frame() {
+    std::optional<DesktopFrame> wait_for_frame(std::chrono::milliseconds timeout) {
         frame_ready = false;
         stream_error.clear();
         captured_frame = {};
 
         struct pw_loop* event_loop = pw_main_loop_get_loop(loop);
         pw_loop_enter(event_loop);
-        int iterations = 0;
-        constexpr int kMaxIterations = 400;
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (!frame_ready) {
             if (!stream_error.empty()) {
                 pw_loop_leave(event_loop);
@@ -131,14 +191,13 @@ struct PipeWireDesktopCaptureSource::Impl {
                 pw_loop_leave(event_loop);
                 throw std::runtime_error("PipeWire loop iteration failed");
             }
-            ++iterations;
-            if (iterations >= kMaxIterations) {
+            if (std::chrono::steady_clock::now() >= deadline) {
                 pw_loop_leave(event_loop);
-                throw std::runtime_error("timed out waiting for PipeWire frame");
+                return std::nullopt;
             }
         }
         pw_loop_leave(event_loop);
-        return captured_frame;
+        return std::move(captured_frame);
     }
 
     DesktopFrame decode_buffer(struct pw_buffer* buffer) {
@@ -257,7 +316,15 @@ std::string PipeWireDesktopCaptureSource::name() const {
 }
 
 DesktopFrame PipeWireDesktopCaptureSource::capture() {
-    return impl_->wait_for_frame();
+    auto frame = impl_->wait_for_frame(std::chrono::seconds(10));
+    if (!frame) {
+        throw std::runtime_error("timed out waiting for PipeWire frame");
+    }
+    return std::move(*frame);
+}
+
+std::optional<DesktopFrame> PipeWireDesktopCaptureSource::try_capture(std::chrono::milliseconds timeout) {
+    return impl_->wait_for_frame(timeout);
 }
 
 }  // namespace capturer::sample

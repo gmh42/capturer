@@ -26,6 +26,9 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/capturer_sample
 
+# Capture PipeWire frames for three seconds and report capture FPS
+./build/capturer_pipewire_benchmark
+
 # Wayland path: the sample opens the desktop portal and asks you to select a monitor
 ./build/capturer_sample
 ```

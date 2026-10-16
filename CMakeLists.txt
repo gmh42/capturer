@@ -76,6 +76,23 @@ endif()
 
 target_link_libraries(capturer_sample PRIVATE capturer_core X11::X11 PkgConfig::GIO)
 
+add_executable(capturer_pipewire_benchmark
+    src/sample/pipewire_capture_benchmark.cpp
+    src/sample/wayland_portal_capture.cpp
+)
+target_include_directories(capturer_pipewire_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+if(PIPEWIRE_INCLUDE_DIR AND PIPEWIRE_LIBRARY)
+    target_sources(capturer_pipewire_benchmark PRIVATE src/sample/pipewire_desktop_capture.cpp)
+    target_include_directories(capturer_pipewire_benchmark PRIVATE ${PIPEWIRE_INCLUDE_DIR})
+    if(SPA_INCLUDE_DIR)
+        target_include_directories(capturer_pipewire_benchmark PRIVATE ${SPA_INCLUDE_DIR})
+    endif()
+    target_link_libraries(capturer_pipewire_benchmark PRIVATE ${PIPEWIRE_LIBRARY})
+endif()
+
+target_link_libraries(capturer_pipewire_benchmark PRIVATE PkgConfig::GIO)
+
 if(BUILD_TESTING)
     add_test(NAME tile_difference_tests COMMAND capturer_tests)
     add_test(NAME pipeline_tests COMMAND capturer_pipeline_tests)

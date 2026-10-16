@@ -1,8 +1,10 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -68,11 +70,14 @@ public:
 
     std::string name() const override;
     DesktopFrame capture() override;
+    std::optional<DesktopFrame> try_capture(std::chrono::milliseconds timeout);
 
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+PipeWireDesktopCaptureConfig open_wayland_portal_capture();
 
 #endif
 
