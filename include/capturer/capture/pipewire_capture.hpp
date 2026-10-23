@@ -8,31 +8,27 @@
 #include <vector>
 
 #include "capturer/gpu/vulkan_runtime.hpp"
-#include "capturer/image_processing/frame_processor.hpp"
+#include "capturer/frame/frame_info.hpp"
+#include "capturer/image_processing/image_processor.hpp"
 
 #include <functional>
 #include <memory>
 
 namespace capturer::capture {
 
-struct FrameBuffer {
-    std::size_t width;
-    std::size_t height;
-    std::vector<std::uint8_t> bytes;
-    bool on_gpu;
-    std::shared_ptr<capturer::gpu::GpuBuffer> gpu_buffer;
-};
+using FramePtr = std::shared_ptr<const capturer::frame::IFrameInfo>;
 
 struct CaptureResult {
     std::string processor_name;
-    FrameBuffer frame;
-    capturer::image_processing::TileDiff tile_diff;
+    capturer::image_processing::ProcessorBackend backend = capturer::image_processing::ProcessorBackend::None;
+    FramePtr frame;
+    std::shared_ptr<capturer::image_processing::IProcessResult> result;
 };
 
 class CaptureBackend {
 public:
     virtual ~CaptureBackend() = default;
-    virtual FrameBuffer capture_frame(std::size_t width, std::size_t height) = 0;
+    virtual FramePtr capture_frame(std::size_t width, std::size_t height) = 0;
 };
 
 struct PipeWireStreamConfig {
@@ -63,7 +59,7 @@ public:
 
     ~PipeWireCaptureBackend();
 
-    FrameBuffer capture_frame(std::size_t width, std::size_t height) override;
+    FramePtr capture_frame(std::size_t width, std::size_t height) override;
 
     const std::string& source_name() const { return source_name_; }
     void set_frame_callback(std::function<void(const PipeWireFrameEvent&)> callback);
@@ -80,15 +76,15 @@ private:
 
 class CapturePipeline {
 public:
-    CapturePipeline(std::unique_ptr<CaptureBackend> backend, std::unique_ptr<capturer::image_processing::FrameProcessor> processor)
+    CapturePipeline(std::unique_ptr<CaptureBackend> backend, capturer::image_processing::ImageProcessorDispatcher processor)
         : backend_(std::move(backend)), processor_(std::move(processor)) {}
 
     CaptureResult process_frame();
 
 private:
     std::unique_ptr<CaptureBackend> backend_;
-    std::unique_ptr<capturer::image_processing::FrameProcessor> processor_;
-    FrameBuffer previous_frame_;
+    capturer::image_processing::ImageProcessorDispatcher processor_;
+    FramePtr previous_frame_;
 };
 
 }  // namespace capturer::capture

@@ -51,37 +51,22 @@ void PipeWireCaptureBackend::set_stream_config(const PipeWireStreamConfig& confi
     }
 }
 
-FrameBuffer PipeWireCaptureBackend::capture_frame(std::size_t width, std::size_t height) {
-    FrameBuffer frame{};
-    frame.width = width;
-    frame.height = height;
-    frame.on_gpu = false;
-    frame.bytes.resize(width * height, 0);
-
-#if HAVE_PIPEWIRE
-    (void)stream_config_;
-#endif
-
-    for (std::size_t i = 0; i < frame.bytes.size(); ++i) {
+FramePtr PipeWireCaptureBackend::capture_frame(std::size_t width, std::size_t height) {
+    // Placeholder frame source: this backend does not read a real PipeWire stream (see PipeWireDesktopCaptureSource).
+    const std::size_t stride = width * 4;
+    std::vector<std::uint8_t> bytes(stride * height);
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
         const std::size_t lane = (i + frame_counter_ + source_name_.size()) % 256;
-        frame.bytes[i] = static_cast<std::uint8_t>(lane);
+        bytes[i] = static_cast<std::uint8_t>(lane);
     }
     ++frame_counter_;
-
-    if (runtime_ && runtime_->initialize()) {
-        auto dma_image = runtime_->create_dma_buf_image(static_cast<int>(width), static_cast<int>(height));
-        if (dma_image) {
-            frame.on_gpu = true;
-            frame.gpu_buffer = dma_image;
-        }
-    }
 
 #if HAVE_PIPEWIRE
     if (frame_callback_) {
         PipeWireFrameEvent event{};
         event.width = width;
         event.height = height;
-        event.bytes = frame.bytes;
+        event.bytes = bytes;
         frame_callback_(event);
     }
 #endif
@@ -93,18 +78,19 @@ FrameBuffer PipeWireCaptureBackend::capture_frame(std::size_t width, std::size_t
     }
 #endif
 
-    return frame;
+    return std::make_shared<capturer::frame::CpuFrame>(
+        width, height, capturer::frame::PixelFormat::RGBA8, std::move(bytes), stride);
 }
 
 CaptureResult CapturePipeline::process_frame() {
     constexpr std::size_t width = 64;
     constexpr std::size_t height = 64;
 
-    const auto current = backend_->capture_frame(width, height);
-    const auto diff = processor_->process(previous_frame_.bytes, current.bytes, width, height);
+    auto current = backend_->capture_frame(width, height);
+    std::shared_ptr<capturer::image_processing::IProcessResult> result = processor_.process(previous_frame_.get(), *current);
     previous_frame_ = current;
 
-    return CaptureResult{processor_->name(), current, diff};
+    return CaptureResult{processor_.selected_name(), processor_.selected_backend(), std::move(current), std::move(result)};
 }
 
 }  // namespace capturer::capture

@@ -43,6 +43,19 @@ std::string make_error_message(const char* what, int code) {
     return std::string(what) + ": " + std::strerror(code < 0 ? -code : code);
 }
 
+capturer::frame::PixelFormat to_pixel_format(spa_video_format format) {
+    switch (format) {
+    case SPA_VIDEO_FORMAT_RGBA: return capturer::frame::PixelFormat::RGBA8;
+    case SPA_VIDEO_FORMAT_BGRA: return capturer::frame::PixelFormat::BGRA8;
+    case SPA_VIDEO_FORMAT_RGBx: return capturer::frame::PixelFormat::RGBX8;
+    case SPA_VIDEO_FORMAT_BGRx: return capturer::frame::PixelFormat::BGRX8;
+    case SPA_VIDEO_FORMAT_ARGB: return capturer::frame::PixelFormat::ARGB8;
+    case SPA_VIDEO_FORMAT_NV12: return capturer::frame::PixelFormat::NV12;
+    case SPA_VIDEO_FORMAT_I420: return capturer::frame::PixelFormat::I420;
+    default: return capturer::frame::PixelFormat::Unknown;
+    }
+}
+
 }  // namespace
 
 struct PipeWireDesktopCaptureSource::Impl {
@@ -237,6 +250,7 @@ struct PipeWireDesktopCaptureSource::Impl {
         frame.height = config.height;
         frame.stride = config.width * 4;
         frame.storage = FrameStorage::CpuRgba8;
+        frame.format = negotiated_format;
 
         if (!buffer || !buffer->buffer || buffer->buffer->n_datas == 0) {
             return frame;
@@ -261,6 +275,9 @@ struct PipeWireDesktopCaptureSource::Impl {
         if (data.type == SPA_DATA_DmaBuf && data.fd >= 0) {
             frame.storage = FrameStorage::DmaBuf;
             frame.dma_buf_fd = dup(static_cast<int>(data.fd));
+            frame.dma_buf_offset = chunk ? chunk->offset : 0;
+            frame.has_drm_modifier = negotiated_has_modifier;
+            frame.drm_modifier = negotiated_modifier;
             return frame;
         }
 
@@ -318,6 +335,9 @@ struct PipeWireDesktopCaptureSource::Impl {
         self->config.height = std::max<std::size_t>(1, info.info.raw.size.height);
         // framerate is 0/1 for variable-rate streams, where max_framerate holds the ceiling instead.
         const spa_fraction fixed_rate = info.info.raw.framerate;
+        self->negotiated_format = to_pixel_format(info.info.raw.format);
+        self->negotiated_has_modifier = (info.info.raw.flags & SPA_VIDEO_FLAG_MODIFIER) != 0;
+        self->negotiated_modifier = info.info.raw.modifier;
         self->negotiated_max_framerate = fixed_rate.num != 0 ? fixed_rate : info.info.raw.max_framerate;
 
         // A modifier in the negotiated format means the producer chose dma-buf.
@@ -357,6 +377,9 @@ struct PipeWireDesktopCaptureSource::Impl {
     DesktopFrame captured_frame{};
     std::string stream_error;
     spa_fraction negotiated_max_framerate{0, 1};
+    capturer::frame::PixelFormat negotiated_format = capturer::frame::PixelFormat::Unknown;
+    bool negotiated_has_modifier = false;
+    std::uint64_t negotiated_modifier = 0;
     bool frame_ready = false;
     bool pipewire_initialized = false;
 

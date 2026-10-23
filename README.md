@@ -4,7 +4,8 @@ A CMake-based C++ prototype for a desktop capture pipeline that is designed to s
 
 - pipewire-style capture backends
 - GPU-ready frame staging with a Vulkan-facing abstraction
-- downstream processing through an interchangeable frame processor interface
+- a platform-neutral frame description (`IFrameInfo`) covering CPU and GPU-resident frames
+- downstream processing through an interchangeable image processor interface (`IImageProcessor`)
 - a tile-difference processor for change detection on 16x16 blocks
 - an X11 sample application that captures the desktop and feeds the frames to the diff pipeline
 - an optional PipeWire stream source that preserves dma-buf frames for Wayland zero-copy integration
@@ -12,11 +13,38 @@ A CMake-based C++ prototype for a desktop capture pipeline that is designed to s
 ## Structure
 
 - include/capturer/capture/pipewire_capture.hpp: capture backend and pipeline API
-- include/capturer/image_processing/frame_processor.hpp: processor abstraction
+- include/capturer/frame/frame_info.hpp: `IFrameInfo`, pixel formats, plane layouts, `CpuFrame`/`GpuFrame`
+- include/capturer/image_processing/image_processor.hpp: `IImageProcessor`, null and CPU processors, dispatcher
+- include/capturer/image_processing/vulkan_tile_processor.hpp: Vulkan tile processor (gated until dma-buf import exists)
 - include/capturer/image_processing/tile_difference.hpp: reference tile-difference helper
 - include/capturer/gpu/vulkan_runtime.hpp: Vulkan runtime abstraction for future GPU integration
 - src/: implementation files for the pipeline, processors, and runtime stub
 - tests/: simple tests for the tile-difference logic and pipeline flow
+
+## Frames and processors
+
+`IFrameInfo` describes a frame without exposing Vulkan or D3D types: width, height, `PixelFormat`
+(RGBA8, BGRA8, RGBX8, BGRX8, ARGB8, NV12, I420, P010), per-plane offset/stride/size, colour space and range,
+producer sequence and timestamp, and where the pixels live (`MemoryKind`: Cpu, DmaBuf, VulkanImage, D3D11Texture,
+D3D12Resource). `describe(format)` reports plane count, components, bits per component and per pixel, alpha and
+chroma subsampling. CPU frames expose `cpu_data()`; GPU frames expose a `GpuHandle` (dma-buf fds, DRM fourcc and
+modifier, native handle, acquire fence) and close their fds on destruction.
+
+An `IImageProcessor` declares the memory kinds and formats it accepts and processes a (previous, current) frame pair
+into an `IProcessResult`, which may stay on the GPU until `tile_diff()` reads it back. `ImageProcessorDispatcher`
+picks the first registered processor that accepts each frame and otherwise falls back to `NullImageProcessor`
+(skip). It never copies between CPU and GPU memory; `fell_back()` reports a mismatch. Register the preferred backend
+first:
+
+```cpp
+ImageProcessorDispatcher dispatcher;
+dispatcher.add(std::make_unique<VulkanTileDifferenceProcessor>(runtime, 16));  // dma-buf frames
+dispatcher.add(std::make_unique<CpuTileDifferenceProcessor>(16));              // CPU frames
+auto result = dispatcher.process(previous.get(), *current);
+```
+
+The Vulkan processor does not accept frames yet: `VulkanRuntime` can export but not import dma-bufs, and the
+compute pass is unwritten. dma-buf frames therefore currently skip processing.
 
 ## Build and test
 

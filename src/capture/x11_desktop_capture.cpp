@@ -94,6 +94,7 @@ DesktopFrame X11DesktopCaptureSource::capture() {
     frame.height = static_cast<std::size_t>(height);
     frame.stride = frame.width * 4;
     frame.storage = FrameStorage::CpuRgba8;
+    frame.format = capturer::frame::PixelFormat::RGBA8;
     frame.pixels.resize(frame.stride * frame.height);
 
     for (std::size_t y = 0; y < frame.height; ++y) {

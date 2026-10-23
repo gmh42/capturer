@@ -1,4 +1,5 @@
-#include "capturer/image_processing/tile_difference.hpp"
+#include "capturer/image_processing/image_processor.hpp"
+#include "capturer/image_processing/vulkan_tile_processor.hpp"
 #include "capturer/gpu/vulkan_runtime.hpp"
 #include "capturer/sample/desktop_capture.hpp"
 
@@ -43,35 +44,13 @@ int main() {
         auto capture_source = make_capture_source();
         auto runtime = std::make_shared<capturer::gpu::VulkanRuntime>();
 
-        const auto first_frame = capture_source->capture();
-        const auto second_frame = capture_source->capture();
+        auto first_frame = capture_source->capture();
+        auto second_frame = capture_source->capture();
 
         std::cout << "capture source: " << capture_source->name() << '\n';
         print_frame_summary(first_frame);
 
-        if (!first_frame.pixels.empty() && !second_frame.pixels.empty() && first_frame.pixels.size() == second_frame.pixels.size()) {
-            std::vector<std::uint8_t> previous(first_frame.pixels.begin(), first_frame.pixels.end());
-            std::vector<std::uint8_t> current(second_frame.pixels.begin(), second_frame.pixels.end());
-            const auto diff = capturer::image_processing::compute_tile_difference(
-                previous,
-                current,
-                first_frame.width * 4,
-                first_frame.height,
-                16);
-
-            std::cout << "tiles: " << diff.width << "x" << diff.height << " changed=";
-
-            std::size_t changed_tiles = 0;
-            for (const auto& tile : diff.tiles) {
-                if (tile.changed) {
-                    ++changed_tiles;
-                }
-            }
-            std::cout << changed_tiles << '/' << diff.tiles.size() << '\n';
-        } else {
-            std::cout << "tiles: skipped for dma-buf frame" << '\n';
-        }
-
+        // Consumes the frames below, so anything that needs their pixels runs first.
         if (!first_frame.pixels.empty() && runtime->initialize()) {
             auto gpu_buffer = runtime->upload_bytes(first_frame.pixels);
             std::cout << "vulkan: " << runtime->describe();
@@ -81,6 +60,32 @@ int main() {
             std::cout << '\n';
         } else {
             std::cout << "vulkan: skipped" << '\n';
+        }
+
+        capturer::image_processing::ImageProcessorDispatcher processor;
+        processor.add(std::make_unique<capturer::image_processing::VulkanTileDifferenceProcessor>(runtime, 16));
+        processor.add(std::make_unique<capturer::image_processing::CpuTileDifferenceProcessor>(16));
+
+        const auto first_info = capturer::sample::to_frame_info(std::move(first_frame));
+        const auto second_info = capturer::sample::to_frame_info(std::move(second_frame));
+        auto result = processor.process(first_info.get(), *second_info);
+
+        std::cout << "processor: " << processor.selected_name()
+                  << " (memory: " << capturer::frame::to_string(second_info->memory_kind())
+                  << ", format: " << capturer::frame::to_string(second_info->format()) << ")\n";
+        if (result->skipped()) {
+            std::cout << "tiles: skipped, no processor accepts " << capturer::frame::to_string(second_info->memory_kind())
+                      << " frames" << '\n';
+        } else {
+            const auto& diff = result->tile_diff();
+            std::size_t changed_tiles = 0;
+            for (const auto& tile : diff.tiles) {
+                if (tile.changed) {
+                    ++changed_tiles;
+                }
+            }
+            std::cout << "tiles: " << diff.width << "x" << diff.height << " changed=" << changed_tiles << '/'
+                      << diff.tiles.size() << '\n';
         }
 
         return 0;

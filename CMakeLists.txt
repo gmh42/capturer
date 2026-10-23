@@ -24,8 +24,10 @@ endif()
 add_library(capturer_core STATIC
     src/capture/pipeline.cpp
     src/gpu/vulkan_runtime.cpp
-    src/image_processing/frame_processor.cpp
+    src/frame/frame_info.cpp
+    src/image_processing/image_processor.cpp
     src/image_processing/tile_difference.cpp
+    src/image_processing/vulkan_tile_processor.cpp
 )
 
 target_include_directories(capturer_core
@@ -53,6 +55,18 @@ add_executable(capturer_tests
 
 target_link_libraries(capturer_tests PRIVATE capturer_core)
 
+add_executable(capturer_frame_tests
+    tests/test_frame_info.cpp
+)
+
+target_link_libraries(capturer_frame_tests PRIVATE capturer_core)
+
+add_executable(capturer_processor_tests
+    tests/test_image_processor.cpp
+)
+
+target_link_libraries(capturer_processor_tests PRIVATE capturer_core)
+
 add_executable(capturer_pipeline_tests
     tests/test_pipeline.cpp
 )
@@ -62,6 +76,7 @@ target_link_libraries(capturer_pipeline_tests PRIVATE capturer_core)
 add_executable(capturer_sample
     src/capture/x11_desktop_capture.cpp
     src/sample/desktop_capture_sample.cpp
+    src/sample/frame_adapter.cpp
     src/sample/wayland_portal_capture.cpp
 )
 
@@ -97,5 +112,7 @@ target_link_libraries(capturer_pipewire_benchmark PRIVATE PkgConfig::GIO)
 
 if(BUILD_TESTING)
     add_test(NAME tile_difference_tests COMMAND capturer_tests)
+    add_test(NAME frame_tests COMMAND capturer_frame_tests)
+    add_test(NAME processor_tests COMMAND capturer_processor_tests)
     add_test(NAME pipeline_tests COMMAND capturer_pipeline_tests)
 endif()

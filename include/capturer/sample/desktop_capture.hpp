@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "capturer/frame/frame_info.hpp"
+
 #ifndef HAVE_PIPEWIRE
 #define HAVE_PIPEWIRE 0
 #endif
@@ -26,6 +28,11 @@ struct DesktopFrame {
     FrameStorage storage = FrameStorage::CpuRgba8;
     std::vector<std::uint8_t> pixels;
     int dma_buf_fd = -1;
+    capturer::frame::PixelFormat format = capturer::frame::PixelFormat::Unknown;
+    // Single-plane dma-buf layout; the modifier is meaningful only when has_drm_modifier is set.
+    std::uint32_t dma_buf_offset = 0;
+    std::uint64_t drm_modifier = 0;
+    bool has_drm_modifier = false;
     // Producer sequence number and presentation time (ns) from the PipeWire header meta.
     bool has_header = false;
     std::uint64_t sequence = 0;
@@ -33,6 +40,10 @@ struct DesktopFrame {
 
     bool has_dma_buf() const { return dma_buf_fd >= 0; }
 };
+
+// Converts a captured frame into the platform-neutral description. A dma-buf frame hands its fd to the result,
+// which closes it; the DesktopFrame's fd is cleared.
+std::shared_ptr<const capturer::frame::IFrameInfo> to_frame_info(DesktopFrame&& frame);
 
 class DesktopCaptureSource {
 public:

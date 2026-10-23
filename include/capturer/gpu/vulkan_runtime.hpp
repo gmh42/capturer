@@ -51,6 +51,8 @@ public:
     bool supports_gpu() const;
     std::string describe() const;
     bool initialize();
+    // True once external dma-buf frames can be imported as Vulkan images. Export-only today, so always false.
+    bool supports_dma_buf_import() const { return false; }
     std::shared_ptr<GpuBuffer> upload_bytes(const std::vector<std::uint8_t>& bytes);
     std::shared_ptr<GpuBuffer> create_dma_buf_image(int width, int height);
     std::vector<std::uint8_t> download_bytes(const GpuBuffer& buffer);
