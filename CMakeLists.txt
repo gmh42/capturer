@@ -43,6 +43,24 @@ if(SPA_INCLUDE_DIR)
 endif()
 
 target_compile_features(capturer_core PUBLIC cxx_std_20)
+
+find_program(GLSLANG_VALIDATOR NAMES glslangValidator)
+if(GLSLANG_VALIDATOR)
+    set(TILE_SHADER_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/gpu/shaders/tile_difference.comp)
+    set(TILE_SHADER_SPV ${CMAKE_CURRENT_BINARY_DIR}/tile_difference.spv)
+    set(TILE_SHADER_CPP ${CMAKE_CURRENT_BINARY_DIR}/tile_difference_spv.cpp)
+    add_custom_command(
+        OUTPUT ${TILE_SHADER_CPP}
+        COMMAND ${GLSLANG_VALIDATOR} -V ${TILE_SHADER_SRC} -o ${TILE_SHADER_SPV}
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${TILE_SHADER_SPV} -DOUTPUT=${TILE_SHADER_CPP}
+                -DSYMBOL=kTileDifferenceSpirv -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
+        DEPENDS ${TILE_SHADER_SRC} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
+        VERBATIM)
+    target_sources(capturer_core PRIVATE ${TILE_SHADER_CPP})
+    target_compile_definitions(capturer_core PUBLIC CAPTURER_HAS_TILE_SHADER=1)
+else()
+    message(WARNING "glslangValidator not found: the Vulkan tile processor will refuse all frames")
+endif()
 target_link_libraries(capturer_core PUBLIC Vulkan::Vulkan)
 target_link_libraries(capturer_core PUBLIC drm gbm)
 if(PIPEWIRE_LIBRARY)
@@ -66,6 +84,12 @@ add_executable(capturer_processor_tests
 )
 
 target_link_libraries(capturer_processor_tests PRIVATE capturer_core)
+
+add_executable(capturer_vulkan_dma_buf_tests
+    tests/test_vulkan_dma_buf.cpp
+)
+
+target_link_libraries(capturer_vulkan_dma_buf_tests PRIVATE capturer_core)
 
 add_executable(capturer_pipeline_tests
     tests/test_pipeline.cpp
@@ -115,4 +139,6 @@ if(BUILD_TESTING)
     add_test(NAME frame_tests COMMAND capturer_frame_tests)
     add_test(NAME processor_tests COMMAND capturer_processor_tests)
     add_test(NAME pipeline_tests COMMAND capturer_pipeline_tests)
+    add_test(NAME vulkan_dma_buf_tests COMMAND capturer_vulkan_dma_buf_tests)
+    set_tests_properties(vulkan_dma_buf_tests PROPERTIES SKIP_RETURN_CODE 77)
 endif()

@@ -68,6 +68,8 @@ int main() {
 
         const auto first_info = capturer::sample::to_frame_info(std::move(first_frame));
         const auto second_info = capturer::sample::to_frame_info(std::move(second_frame));
+        // Stateful processors (Vulkan) must see frames in order: the first call seeds the baseline.
+        processor.process(nullptr, *first_info);
         auto result = processor.process(first_info.get(), *second_info);
 
         std::cout << "processor: " << processor.selected_name()
