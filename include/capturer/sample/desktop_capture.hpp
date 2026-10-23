@@ -26,6 +26,10 @@ struct DesktopFrame {
     FrameStorage storage = FrameStorage::CpuRgba8;
     std::vector<std::uint8_t> pixels;
     int dma_buf_fd = -1;
+    // Producer sequence number and presentation time (ns) from the PipeWire header meta.
+    bool has_header = false;
+    std::uint64_t sequence = 0;
+    std::int64_t pts_ns = 0;
 
     bool has_dma_buf() const { return dma_buf_fd >= 0; }
 };

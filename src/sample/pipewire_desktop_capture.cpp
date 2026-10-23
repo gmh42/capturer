@@ -22,6 +22,7 @@
 #include <drm_fourcc.h>
 
 #include <spa/buffer/buffer.h>
+#include <spa/buffer/meta.h>
 #include <spa/pod/parser.h>
 #include <spa/param/buffers.h>
 #include <spa/param/format.h>
@@ -242,6 +243,12 @@ struct PipeWireDesktopCaptureSource::Impl {
         }
 
         struct spa_buffer* spa_buffer = buffer->buffer;
+        if (const auto* header = static_cast<const struct spa_meta_header*>(
+                spa_buffer_find_meta_data(spa_buffer, SPA_META_Header, sizeof(struct spa_meta_header)))) {
+            frame.has_header = true;
+            frame.sequence = header->seq;
+            frame.pts_ns = header->pts;
+        }
         const struct spa_data& data = spa_buffer->datas[0];
         const struct spa_chunk* chunk = data.chunk;
         if (chunk && chunk->stride > 0) {
@@ -318,7 +325,7 @@ struct PipeWireDesktopCaptureSource::Impl {
         const std::int32_t data_types = use_dma_buf
             ? (1 << SPA_DATA_DmaBuf)
             : ((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr));
-        std::uint8_t pod_buffer[256];
+        std::uint8_t pod_buffer[512];
         spa_pod_builder builder = SPA_POD_BUILDER_INIT(pod_buffer, sizeof(pod_buffer));
         const spa_pod* buffers = static_cast<const spa_pod*>(spa_pod_builder_add_object(
             &builder,
@@ -326,8 +333,18 @@ struct PipeWireDesktopCaptureSource::Impl {
             SPA_PARAM_Buffers,
             SPA_PARAM_BUFFERS_dataType,
             SPA_POD_Int(data_types)));
-        if (buffers) {
-            pw_stream_update_params(self->stream, &buffers, 1);
+        // The header meta (sequence, pts) is only attached to buffers when requested.
+        const spa_pod* header_meta = static_cast<const spa_pod*>(spa_pod_builder_add_object(
+            &builder,
+            SPA_TYPE_OBJECT_ParamMeta,
+            SPA_PARAM_Meta,
+            SPA_PARAM_META_type,
+            SPA_POD_Id(SPA_META_Header),
+            SPA_PARAM_META_size,
+            SPA_POD_Int(sizeof(struct spa_meta_header))));
+        if (buffers && header_meta && !spa_pod_builder_corrupted(&builder)) {
+            const spa_pod* update[] = {buffers, header_meta};
+            pw_stream_update_params(self->stream, update, 2);
         }
     }
 
