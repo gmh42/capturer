@@ -19,16 +19,23 @@ std::shared_ptr<const capturer::frame::IFrameInfo> to_frame_info(DesktopFrame&& 
         handle.drm_fourcc = capturer::frame::to_drm_fourcc(format);
         handle.drm_modifier = frame.drm_modifier;
         handle.has_drm_modifier = frame.has_drm_modifier;
+        handle.lifetime = std::move(frame.buffer_lease);
         frame.dma_buf_fd = -1;
 
         auto planes = capturer::frame::default_planes(format, frame.width, frame.height, frame.stride);
         if (!planes.empty()) {
             planes[0].offset = frame.dma_buf_offset;
         }
-        return std::make_shared<GpuFrame>(frame.width, frame.height, format, MemoryKind::DmaBuf, std::move(handle), std::move(planes));
+        capturer::frame::FrameMetadata metadata;
+        metadata.sequence = frame.sequence;
+        metadata.pts_ns = frame.pts_ns;
+        return std::make_shared<GpuFrame>(frame.width, frame.height, format, MemoryKind::DmaBuf, std::move(handle), std::move(planes), metadata);
     }
 
-    return std::make_shared<CpuFrame>(frame.width, frame.height, format, std::move(frame.pixels), frame.stride);
+    capturer::frame::FrameMetadata metadata;
+    metadata.sequence = frame.sequence;
+    metadata.pts_ns = frame.pts_ns;
+    return std::make_shared<CpuFrame>(frame.width, frame.height, format, std::move(frame.pixels), frame.stride, metadata);
 }
 
 }  // namespace capturer::sample

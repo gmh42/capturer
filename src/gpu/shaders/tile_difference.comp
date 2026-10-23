@@ -1,12 +1,12 @@
 #version 450
 #extension GL_EXT_samplerless_texture_functions : require
 
-// One workgroup per tile. Compares the imported frame with the stored copy of the previous frame,
-// writes 1/0 per tile, and stores the current pixels as the next comparison baseline.
+// One workgroup per tile. Compares the current frame with the previous frame (both imported dma-bufs)
+// and writes 1/0 per tile.
 layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(set = 0, binding = 0) uniform texture2D current_frame;
-layout(set = 0, binding = 1, rgba8) uniform image2D state_frame;
+layout(set = 0, binding = 1) uniform texture2D previous_frame;
 layout(set = 0, binding = 2, std430) writeonly buffer Result {
     uint changed[];
 } result;
@@ -32,18 +32,15 @@ void main() {
     const uvec2 limit = min(origin + params.tile_size, uvec2(params.width, params.height));
     uint diff = 0u;
 
-    for (uint y = origin.y + gl_LocalInvocationID.y; y < limit.y; y += 16u) {
-        for (uint x = origin.x + gl_LocalInvocationID.x; x < limit.x; x += 16u) {
-            const ivec2 p = ivec2(x, y);
-            const vec4 cur = texelFetch(current_frame, p, 0);
-            if (params.has_previous != 0u) {
-                const vec4 prev = imageLoad(state_frame, p);
-                const bvec4 ne = notEqual(cur, prev);
+    if (params.has_previous != 0u) {
+        for (uint y = origin.y + gl_LocalInvocationID.y; y < limit.y; y += 16u) {
+            for (uint x = origin.x + gl_LocalInvocationID.x; x < limit.x; x += 16u) {
+                const ivec2 p = ivec2(x, y);
+                const bvec4 ne = notEqual(texelFetch(current_frame, p, 0), texelFetch(previous_frame, p, 0));
                 if (any(ne.rgb) || (params.compare_alpha != 0u && ne.a)) {
                     diff = 1u;
                 }
             }
-            imageStore(state_frame, p, cur);
         }
     }
 

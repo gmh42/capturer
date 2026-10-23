@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace capturer::frame {
@@ -70,6 +71,9 @@ struct GpuHandle {
     bool has_drm_modifier = false;
     std::uint64_t native = 0;            // Win32 shared handle or API-specific handle
     int acquire_fence_fd = -1;           // sync_file the consumer must wait on before reading, if any
+    // Keeps the producer's buffer reserved (e.g. a PipeWire buffer withheld from the compositor) until the frame
+    // is destroyed. Without it the producer may overwrite the memory while a consumer still reads it.
+    std::shared_ptr<void> lifetime;
 };
 
 // Computes the plane layout for a tightly packed frame. stride0 of 0 means width * bytes per pixel.
@@ -100,6 +104,10 @@ public:
     bool is_gpu() const { return !is_cpu(); }
     std::size_t stride() const { return plane_count() > 0 ? plane(0).stride : 0; }
 };
+
+// Frames are shared so that anything still reading one (a GPU job, a pending result) keeps it, and the producer
+// buffer behind it, alive. Hold a FramePtr for as long as the pixels are needed.
+using FramePtr = std::shared_ptr<const IFrameInfo>;
 
 struct FrameMetadata {
     ColorSpace color_space = ColorSpace::Unspecified;

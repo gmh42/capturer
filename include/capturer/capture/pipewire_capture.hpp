@@ -16,7 +16,7 @@
 
 namespace capturer::capture {
 
-using FramePtr = std::shared_ptr<const capturer::frame::IFrameInfo>;
+using FramePtr = capturer::frame::FramePtr;
 
 struct CaptureResult {
     std::string processor_name;

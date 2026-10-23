@@ -28,6 +28,9 @@ CpuFrame make_rgba(std::size_t width, std::size_t height, std::size_t stride = 0
     return CpuFrame(width, height, PixelFormat::RGBA8, std::vector<std::uint8_t>(row * height, 0), stride);
 }
 
+// Non-owning pointer for frames that live on the test's stack.
+FramePtr ref(const IFrameInfo& frame) { return FramePtr(std::shared_ptr<void>(), &frame); }
+
 std::shared_ptr<GpuFrame> make_dma_frame() {
     GpuHandle handle;
     handle.fds = {-1};
@@ -64,7 +67,7 @@ void test_cpu_processor_strided_pixels() {
     CpuFrame current(20, 20, PixelFormat::RGBA8, bytes, 100);
 
     CHECK(processor.can_process(current));
-    auto result = processor.process(&previous, current);
+    auto result = processor.process(ref(previous), ref(current));
     CHECK(!result->skipped() && result->location() == ResultLocation::Cpu);
     const auto& diff = result->tile_diff();
     CHECK(diff.width == 2 && diff.height == 2);
@@ -73,19 +76,19 @@ void test_cpu_processor_strided_pixels() {
     // Padding bytes beyond the visible row must not cause a change.
     bytes[19 * 100 + 99] = 5;
     CpuFrame padded(20, 20, PixelFormat::RGBA8, bytes, 100);
-    CHECK(!processor.process(&current, padded)->tile_diff().tiles[3].changed);
+    CHECK(!processor.process(ref(current), ref(padded))->tile_diff().tiles[3].changed);
 }
 
 void test_cpu_processor_first_frame_and_mismatch() {
     CpuTileDifferenceProcessor processor(16);
     auto frame = make_rgba(32, 32);
-    auto first = processor.process(nullptr, frame);
+    auto first = processor.process(nullptr, ref(frame));
     for (const auto& tile : first->tile_diff().tiles) {
         CHECK(tile.changed);
     }
 
     auto other_size = make_rgba(16, 16);
-    CHECK(processor.process(&other_size, frame)->tile_diff().tiles[0].changed);
+    CHECK(processor.process(ref(other_size), ref(frame))->tile_diff().tiles[0].changed);
 }
 
 void test_cpu_processor_yuv_luma() {
@@ -95,13 +98,13 @@ void test_cpu_processor_yuv_luma() {
     auto b = a;
     b[planes[1].offset] = 9;  // chroma only: ignored
     CpuFrame fa(16, 16, PixelFormat::NV12, a), fb(16, 16, PixelFormat::NV12, b);
-    auto chroma_only = processor.process(&fa, fb);
+    auto chroma_only = processor.process(ref(fa), ref(fb));
     for (const auto& tile : chroma_only->tile_diff().tiles) {
         CHECK(!tile.changed);
     }
     b[0] = 3;  // luma
     CpuFrame fc(16, 16, PixelFormat::NV12, b);
-    CHECK(processor.process(&fa, fc)->tile_diff().tiles[0].changed);
+    CHECK(processor.process(ref(fa), ref(fc))->tile_diff().tiles[0].changed);
 }
 
 void test_cpu_processor_rejects_gpu() {
@@ -110,7 +113,7 @@ void test_cpu_processor_rejects_gpu() {
     CHECK(!processor.can_process(*dma));
     bool threw = false;
     try {
-        processor.process(nullptr, *dma);
+        processor.process(nullptr, dma);
     } catch (const std::invalid_argument&) {
         threw = true;
     }
@@ -120,7 +123,7 @@ void test_cpu_processor_rejects_gpu() {
 void test_null_processor() {
     NullImageProcessor processor;
     auto frame = make_rgba(16, 16);
-    auto result = processor.process(nullptr, frame);
+    auto result = processor.process(nullptr, ref(frame));
     CHECK(result->skipped() && result->location() == ResultLocation::None && result->tile_diff().tiles.empty());
 }
 
@@ -131,16 +134,16 @@ void test_dispatcher() {
     dispatcher.add(std::make_unique<CpuTileDifferenceProcessor>(16));
 
     auto cpu = make_rgba(32, 32);
-    auto result = dispatcher.process(nullptr, cpu);
+    auto result = dispatcher.process(nullptr, ref(cpu));
     CHECK(dispatcher.selected_backend() == ProcessorBackend::Cpu && !dispatcher.fell_back() && !result->skipped());
 
     // Vulkan cannot import dma-bufs yet and the CPU processor refuses GPU memory, so this falls through to skip.
     auto dma = make_dma_frame();
-    result = dispatcher.process(nullptr, *dma);
+    result = dispatcher.process(nullptr, dma);
     CHECK(dispatcher.selected_backend() == ProcessorBackend::None && dispatcher.fell_back() && result->skipped());
 
     ImageProcessorDispatcher empty;
-    CHECK(empty.process(nullptr, cpu)->skipped() && !empty.fell_back());
+    CHECK(empty.process(nullptr, ref(cpu))->skipped() && !empty.fell_back());
 }
 
 void test_vulkan_processor_gated() {

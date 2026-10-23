@@ -41,8 +41,12 @@ public:
     }
 
     // previous is null for the first frame. A previous frame with different dimensions or format is treated as absent.
+    // Both frames are shared: a processor that defers work (GPU) keeps them, and so the producer buffers behind
+    // them, alive until the work finishes. `previous` must still hold valid pixels, i.e. its producer buffer
+    // has not been recycled. Frames from a capture source that holds buffers until release (see
+    // GpuHandle::lifetime) satisfy this for as long as the caller keeps the FramePtr.
     // Callers must check can_process() first; process() throws std::invalid_argument for unsupported frames.
-    virtual std::unique_ptr<IProcessResult> process(const frame::IFrameInfo* previous, const frame::IFrameInfo& current) = 0;
+    virtual std::unique_ptr<IProcessResult> process(const frame::FramePtr& previous, const frame::FramePtr& current) = 0;
 };
 
 // Skips all work. Used as the final fall-through when no real processor accepts a frame.
@@ -52,7 +56,7 @@ public:
     ProcessorBackend backend() const override { return ProcessorBackend::None; }
     frame::MemoryKindMask supported_memory() const override { return ~frame::MemoryKindMask{0}; }
     bool supports_format(frame::PixelFormat) const override { return true; }
-    std::unique_ptr<IProcessResult> process(const frame::IFrameInfo* previous, const frame::IFrameInfo& current) override;
+    std::unique_ptr<IProcessResult> process(const frame::FramePtr& previous, const frame::FramePtr& current) override;
 };
 
 // Tile difference in software over CPU-memory frames. Packed RGB formats compare every byte;
@@ -65,7 +69,7 @@ public:
     ProcessorBackend backend() const override { return ProcessorBackend::Cpu; }
     frame::MemoryKindMask supported_memory() const override { return frame::mask_of(frame::MemoryKind::Cpu); }
     bool supports_format(frame::PixelFormat format) const override { return format != frame::PixelFormat::Unknown; }
-    std::unique_ptr<IProcessResult> process(const frame::IFrameInfo* previous, const frame::IFrameInfo& current) override;
+    std::unique_ptr<IProcessResult> process(const frame::FramePtr& previous, const frame::FramePtr& current) override;
 
 private:
     std::size_t tile_size_;
@@ -81,7 +85,7 @@ public:
     void add(std::unique_ptr<IImageProcessor> processor);
 
     IImageProcessor& select(const frame::IFrameInfo& frame);
-    std::unique_ptr<IProcessResult> process(const frame::IFrameInfo* previous, const frame::IFrameInfo& current);
+    std::unique_ptr<IProcessResult> process(const frame::FramePtr& previous, const frame::FramePtr& current);
 
     // Name and backend of the processor used by the most recent process() call.
     const std::string& selected_name() const { return selected_name_; }

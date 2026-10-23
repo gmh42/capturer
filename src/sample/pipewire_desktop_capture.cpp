@@ -5,10 +5,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <sys/mman.h>
 #include <unistd.h>
@@ -38,6 +40,21 @@ namespace {
 // Bound the accepted PipeWire format range while covering current high-resolution, high-refresh displays.
 constexpr std::uint32_t kMaximumCaptureDimension = 16384;
 constexpr std::uint32_t kMaximumCaptureFrameRate = 240;
+// dma-buf frames are reserved until the consumer releases them. A pipeline holds up to two (previous and current),
+// and the compositor needs at least two more to keep rendering, so ask for a deeper pool than the default.
+constexpr std::int32_t kDmaBufBufferCount = 6;
+constexpr std::int32_t kMinimumDmaBufBuffers = 4;
+constexpr std::int32_t kMaximumDmaBufBuffers = 16;
+
+// Buffers whose frames were released, waiting to be handed back on the PipeWire loop thread.
+// Frames may be destroyed on any thread and even after the capture source is gone, so this is shared state.
+struct BufferReleaseQueue {
+    std::mutex mutex;
+    std::vector<struct pw_buffer*> pending;
+    // Bumped when the stream's buffers are removed; leases from older generations must not be requeued.
+    std::uint64_t generation = 0;
+    bool closed = false;
+};
 
 std::string make_error_message(const char* what, int code) {
     return std::string(what) + ": " + std::strerror(code < 0 ? -code : code);
@@ -195,6 +212,11 @@ struct PipeWireDesktopCaptureSource::Impl {
     }
 
     ~Impl() {
+        {
+            std::lock_guard<std::mutex> lock(releases->mutex);
+            releases->closed = true;
+            releases->pending.clear();
+        }
         if (stream) {
             pw_stream_destroy(stream);
             stream = nullptr;
@@ -226,6 +248,7 @@ struct PipeWireDesktopCaptureSource::Impl {
         pw_loop_enter(event_loop);
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (!frame_ready) {
+            drain_released_buffers();
             if (!stream_error.empty()) {
                 pw_loop_leave(event_loop);
                 throw std::runtime_error(stream_error);
@@ -242,6 +265,33 @@ struct PipeWireDesktopCaptureSource::Impl {
         }
         pw_loop_leave(event_loop);
         return std::move(captured_frame);
+    }
+
+    // Returns released buffers to the compositor. Must run on the loop thread.
+    void drain_released_buffers() {
+        std::vector<struct pw_buffer*> ready;
+        {
+            std::lock_guard<std::mutex> lock(releases->mutex);
+            ready.swap(releases->pending);
+        }
+        for (struct pw_buffer* buffer : ready) {
+            pw_stream_queue_buffer(stream, buffer);
+        }
+    }
+
+    // The returned lease requeues the buffer once the last reference to it is dropped.
+    std::shared_ptr<void> lease_buffer(struct pw_buffer* buffer) {
+        std::uint64_t generation;
+        {
+            std::lock_guard<std::mutex> lock(releases->mutex);
+            generation = releases->generation;
+        }
+        return std::shared_ptr<void>(buffer, [queue = releases, generation](void* released) {
+            std::lock_guard<std::mutex> lock(queue->mutex);
+            if (!queue->closed && queue->generation == generation) {
+                queue->pending.push_back(static_cast<struct pw_buffer*>(released));
+            }
+        });
     }
 
     DesktopFrame decode_buffer(struct pw_buffer* buffer) {
@@ -278,6 +328,7 @@ struct PipeWireDesktopCaptureSource::Impl {
             frame.dma_buf_offset = chunk ? chunk->offset : 0;
             frame.has_drm_modifier = negotiated_has_modifier;
             frame.drm_modifier = negotiated_modifier;
+            frame.buffer_lease = lease_buffer(buffer);
             return frame;
         }
 
@@ -311,6 +362,7 @@ struct PipeWireDesktopCaptureSource::Impl {
             return;
         }
 
+        self->drain_released_buffers();
         struct pw_buffer* buffer = pw_stream_dequeue_buffer(self->stream);
         if (!buffer) {
             return;
@@ -318,7 +370,18 @@ struct PipeWireDesktopCaptureSource::Impl {
 
         self->captured_frame = self->decode_buffer(buffer);
         self->frame_ready = true;
-        pw_stream_queue_buffer(self->stream, buffer);
+        // A dma-buf frame keeps the buffer until it is released; anything else was copied out and can go back now.
+        if (!self->captured_frame.buffer_lease) {
+            pw_stream_queue_buffer(self->stream, buffer);
+        }
+    }
+
+    static void on_stream_remove_buffer(void* data, struct pw_buffer*) {
+        auto* self = static_cast<Impl*>(data);
+        // Outstanding leases refer to buffers that are going away; they must not be requeued.
+        std::lock_guard<std::mutex> lock(self->releases->mutex);
+        ++self->releases->generation;
+        self->releases->pending.clear();
     }
 
     static void on_stream_param_changed(void* data, uint32_t id, const struct spa_pod* param) {
@@ -347,12 +410,21 @@ struct PipeWireDesktopCaptureSource::Impl {
             : ((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr));
         std::uint8_t pod_buffer[512];
         spa_pod_builder builder = SPA_POD_BUILDER_INIT(pod_buffer, sizeof(pod_buffer));
-        const spa_pod* buffers = static_cast<const spa_pod*>(spa_pod_builder_add_object(
-            &builder,
-            SPA_TYPE_OBJECT_ParamBuffers,
-            SPA_PARAM_Buffers,
-            SPA_PARAM_BUFFERS_dataType,
-            SPA_POD_Int(data_types)));
+        const spa_pod* buffers = use_dma_buf
+            ? static_cast<const spa_pod*>(spa_pod_builder_add_object(
+                  &builder,
+                  SPA_TYPE_OBJECT_ParamBuffers,
+                  SPA_PARAM_Buffers,
+                  SPA_PARAM_BUFFERS_buffers,
+                  SPA_POD_CHOICE_RANGE_Int(kDmaBufBufferCount, kMinimumDmaBufBuffers, kMaximumDmaBufBuffers),
+                  SPA_PARAM_BUFFERS_dataType,
+                  SPA_POD_Int(data_types)))
+            : static_cast<const spa_pod*>(spa_pod_builder_add_object(
+                  &builder,
+                  SPA_TYPE_OBJECT_ParamBuffers,
+                  SPA_PARAM_Buffers,
+                  SPA_PARAM_BUFFERS_dataType,
+                  SPA_POD_Int(data_types)));
         // The header meta (sequence, pts) is only attached to buffers when requested.
         const spa_pod* header_meta = static_cast<const spa_pod*>(spa_pod_builder_add_object(
             &builder,
@@ -376,6 +448,7 @@ struct PipeWireDesktopCaptureSource::Impl {
     struct spa_hook listener{};
     DesktopFrame captured_frame{};
     std::string stream_error;
+    std::shared_ptr<BufferReleaseQueue> releases = std::make_shared<BufferReleaseQueue>();
     spa_fraction negotiated_max_framerate{0, 1};
     capturer::frame::PixelFormat negotiated_format = capturer::frame::PixelFormat::Unknown;
     bool negotiated_has_modifier = false;
@@ -384,18 +457,11 @@ struct PipeWireDesktopCaptureSource::Impl {
     bool pipewire_initialized = false;
 
     const struct pw_stream_events stream_events = {
-        PW_VERSION_STREAM_EVENTS,
-        nullptr,
-        &Impl::on_stream_state_changed,
-        nullptr,
-        nullptr,
-        &Impl::on_stream_param_changed,
-        nullptr,
-        nullptr,
-        &Impl::on_stream_process,
-        nullptr,
-        nullptr,
-        nullptr,
+        .version = PW_VERSION_STREAM_EVENTS,
+        .state_changed = &Impl::on_stream_state_changed,
+        .param_changed = &Impl::on_stream_param_changed,
+        .remove_buffer = &Impl::on_stream_remove_buffer,
+        .process = &Impl::on_stream_process,
     };
 };
 

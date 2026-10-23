@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "capturer/image_processing/tile_difference.hpp"
 
@@ -79,8 +80,11 @@ public:
 
     std::shared_ptr<gpu::VulkanRuntime> runtime;
     std::shared_ptr<void> keepalive;
-    std::shared_ptr<gpu::GpuImage> source;
-    std::shared_ptr<gpu::GpuImage> state;
+    // Frames stay reserved until the GPU is done reading them.
+    frame::FramePtr current_frame;
+    frame::FramePtr previous_frame;
+    std::shared_ptr<gpu::GpuImage> current_image;
+    std::shared_ptr<gpu::GpuImage> previous_image;
     VkFence fence = VK_NULL_HANDLE;
     VkSemaphore semaphore = VK_NULL_HANDLE;
     VkCommandPool cmd_pool = VK_NULL_HANDLE;
@@ -158,15 +162,16 @@ bool VulkanTileDifferenceProcessor::can_process(const frame::IFrameInfo& frame) 
 #endif
 }
 
-std::unique_ptr<IProcessResult> VulkanTileDifferenceProcessor::process(const frame::IFrameInfo* previous, const frame::IFrameInfo& current) {
+std::unique_ptr<IProcessResult> VulkanTileDifferenceProcessor::process(const frame::FramePtr& previous, const frame::FramePtr& current_frame) {
 #ifndef CAPTURER_HAS_TILE_SHADER
     (void)previous;
-    (void)current;
+    (void)current_frame;
     throw std::invalid_argument("VulkanTileDifferenceProcessor: built without the tile shader");
 #else
-    if (!can_process(current)) {
+    if (!current_frame || !can_process(*current_frame)) {
         throw std::invalid_argument("VulkanTileDifferenceProcessor cannot process this frame");
     }
+    const frame::IFrameInfo& current = *current_frame;
     const VkDevice device = runtime_->device();
     const frame::GpuHandle& handle = *current.gpu_handle();
 
@@ -180,7 +185,7 @@ std::unique_ptr<IProcessResult> VulkanTileDifferenceProcessor::process(const fra
         check(vkCreateShaderModule(device, &module_info, nullptr, &pipeline->module), "vkCreateShaderModule");
 
         VkDescriptorSetLayoutBinding bindings[3]{};
-        const VkDescriptorType types[3] = {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
+        const VkDescriptorType types[3] = {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
         for (std::uint32_t i = 0; i < 3; ++i) {
             bindings[i].binding = i;
             bindings[i].descriptorType = types[i];
@@ -220,23 +225,28 @@ std::unique_ptr<IProcessResult> VulkanTileDifferenceProcessor::process(const fra
 
     const std::size_t width = current.width();
     const std::size_t height = current.height();
-    if (!state_image_ || state_width_ != width || state_height_ != height) {
-        state_image_ = runtime_->create_image(
-            static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT);
-        if (!state_image_) {
-            throw std::runtime_error("VulkanTileDifferenceProcessor: " + runtime_->last_error());
+    // Reuse the image imported for the previous call when `previous` is that same frame (the ping-pong case).
+    std::shared_ptr<gpu::GpuImage> previous_image;
+    bool has_previous = false;
+    if (previous && previous->width() == width && previous->height() == height && previous->format() == current.format() &&
+        can_process(*previous)) {
+        if (last_image_ && last_frame_.lock() == previous) {
+            previous_image = last_image_;
+        } else {
+            previous_image = runtime_->import_dma_buf_image(*previous, VK_IMAGE_USAGE_SAMPLED_BIT);
         }
-        state_initialized_ = false;
-        state_width_ = width;
-        state_height_ = height;
+        has_previous = previous_image != nullptr;
     }
-    const bool has_previous = previous && state_initialized_ && previous->width() == width && previous->height() == height &&
-                              state_format_ == current.format() && previous->sequence() == last_sequence_ && previous->pts_ns() == last_pts_ns_;
+    if (!has_previous) {
+        previous_image = source;
+    }
 
     auto job = std::make_unique<GpuTileJob>(runtime_);
     job->keepalive = pipeline_;
-    job->source = source;
-    job->state = state_image_;
+    job->current_frame = current_frame;
+    job->previous_frame = has_previous ? previous : nullptr;
+    job->current_image = source;
+    job->previous_image = previous_image;
     job->tiles_x = static_cast<std::uint32_t>((width + tile_size_ - 1) / tile_size_);
     job->tiles_y = static_cast<std::uint32_t>((height + tile_size_ - 1) / tile_size_);
     const VkDeviceSize result_bytes = static_cast<VkDeviceSize>(job->tiles_x) * job->tiles_y * sizeof(std::uint32_t);
@@ -266,12 +276,11 @@ std::unique_ptr<IProcessResult> VulkanTileDifferenceProcessor::process(const fra
     fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     check(vkCreateFence(device, &fence_info, nullptr, &job->fence), "vkCreateFence");
 
-    VkDescriptorPoolSize pool_sizes[3] = {
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}};
+    VkDescriptorPoolSize pool_sizes[2] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}};
     VkDescriptorPoolCreateInfo pool_info{};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_info.maxSets = 1;
-    pool_info.poolSizeCount = 3;
+    pool_info.poolSizeCount = 2;
     pool_info.pPoolSizes = pool_sizes;
     check(vkCreateDescriptorPool(device, &pool_info, nullptr, &job->desc_pool), "vkCreateDescriptorPool");
     VkDescriptorSetAllocateInfo set_alloc{};
@@ -283,7 +292,7 @@ std::unique_ptr<IProcessResult> VulkanTileDifferenceProcessor::process(const fra
     check(vkAllocateDescriptorSets(device, &set_alloc, &set), "vkAllocateDescriptorSets");
 
     VkDescriptorImageInfo source_info{VK_NULL_HANDLE, source->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkDescriptorImageInfo state_info{VK_NULL_HANDLE, state_image_->view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo previous_info{VK_NULL_HANDLE, previous_image->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorBufferInfo buffer_desc{job->buffer, 0, VK_WHOLE_SIZE};
     VkWriteDescriptorSet writes[3]{};
     for (auto& w : writes) {
@@ -295,8 +304,8 @@ std::unique_ptr<IProcessResult> VulkanTileDifferenceProcessor::process(const fra
     writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[0].pImageInfo = &source_info;
     writes[1].dstBinding = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    writes[1].pImageInfo = &state_info;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[1].pImageInfo = &previous_info;
     writes[2].dstBinding = 2;
     writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     writes[2].pBufferInfo = &buffer_desc;
@@ -320,28 +329,27 @@ std::unique_ptr<IProcessResult> VulkanTileDifferenceProcessor::process(const fra
     check(vkBeginCommandBuffer(cmd, &begin), "vkBeginCommandBuffer");
 
     const VkImageSubresourceRange color_range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    // Acquire each dma-buf from the external owner. Drivers preserve the producer's contents despite UNDEFINED.
     VkImageMemoryBarrier barriers[2]{};
-    // Acquire the dma-buf from the external owner. Drivers preserve the producer's contents despite UNDEFINED.
-    barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barriers[0].srcAccessMask = 0;
-    barriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    barriers[0].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    barriers[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barriers[0].srcQueueFamilyIndex = runtime_->external_queue_family();
-    barriers[0].dstQueueFamilyIndex = runtime_->queue_family_index();
-    barriers[0].image = source->image;
-    barriers[0].subresourceRange = color_range;
-    barriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barriers[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    barriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    barriers[1].oldLayout = state_initialized_ ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED;
-    barriers[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    barriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barriers[1].image = state_image_->image;
-    barriers[1].subresourceRange = color_range;
+    std::uint32_t barrier_count = 0;
+    std::vector<const gpu::GpuImage*> acquired{source.get()};
+    if (previous_image != source) {
+        acquired.push_back(previous_image.get());
+    }
+    for (const gpu::GpuImage* image : acquired) {
+        VkImageMemoryBarrier& barrier = barriers[barrier_count++];
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcQueueFamilyIndex = runtime_->external_queue_family();
+        barrier.dstQueueFamilyIndex = runtime_->queue_family_index();
+        barrier.image = image->image;
+        barrier.subresourceRange = color_range;
+    }
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         0, 0, nullptr, 0, nullptr, 2, barriers);
+                         0, 0, nullptr, 0, nullptr, barrier_count, barriers);
 
     const frame::PixelFormatInfo format_info = frame::describe(current.format());
     PushConstants push{static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), static_cast<std::uint32_t>(tile_size_),
@@ -385,10 +393,8 @@ std::unique_ptr<IProcessResult> VulkanTileDifferenceProcessor::process(const fra
     check(runtime_->submit(submit, job->fence), "vkQueueSubmit");
     job->submitted = true;
 
-    state_initialized_ = true;
-    state_format_ = current.format();
-    last_sequence_ = current.sequence();
-    last_pts_ns_ = current.pts_ns();
+    last_frame_ = current_frame;
+    last_image_ = source;
     return job;
 #endif
 }

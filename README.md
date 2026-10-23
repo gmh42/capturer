@@ -40,17 +40,11 @@ first:
 ImageProcessorDispatcher dispatcher;
 dispatcher.add(std::make_unique<VulkanTileDifferenceProcessor>(runtime, 16));  // dma-buf frames
 dispatcher.add(std::make_unique<CpuTileDifferenceProcessor>(16));              // CPU frames
-auto result = dispatcher.process(previous.get(), *current);
+auto result = dispatcher.process(previous, current);  // FramePtr = shared_ptr<const IFrameInfo>
 ```
 
-The Vulkan processor imports each dma-buf as a Vulkan image (`VK_EXT_external_memory_dma_buf` +
-`VK_EXT_image_drm_format_modifier`, no copy) and runs a compute shader that compares it with a device-local copy of
-the previously processed frame (the producer recycles its buffers, so the old dma-buf cannot be re-read). It is
-stateful: `previous` must be the frame passed as `current` on the preceding call, otherwise all tiles are reported
-changed. It accepts single-plane RGB frames with an explicit DRM modifier that the device can import; anything else
-falls through to the next processor. It ignores the padding byte of BGRX/RGBX frames, which the CPU processor
-compares. The shader is compiled with `glslangValidator` at build time; without it the processor refuses all frames.
-`tests/test_vulkan_dma_buf.cpp` checks it against the CPU processor on GBM-allocated buffers (skipped without a GPU).
+The Vulkan processor imports dma-bufs as Vulkan images without copying and compares any two live frames. It is
+described, with its limits and the buffer-lifetime rules, in [differencer.md](differencer.md).
 
 ## Build and test
 

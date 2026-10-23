@@ -44,11 +44,11 @@ constexpr std::size_t kHeight = 36;
 constexpr std::size_t kTile = 16;
 
 struct Made {
-    std::unique_ptr<GpuFrame> gpu;
-    std::unique_ptr<CpuFrame> cpu;
+    std::shared_ptr<GpuFrame> gpu;
+    std::shared_ptr<CpuFrame> cpu;
 };
 
-Made make_frame(gbm_device* device, PixelFormat format, std::uint64_t sequence, const std::function<Pixel(std::size_t, std::size_t)>& pixel) {
+Made make_frame(gbm_device* device, PixelFormat format, std::uint64_t sequence, const std::function<Pixel(std::size_t, std::size_t)>& pixel, std::shared_ptr<void> lifetime = {}) {
     const std::uint32_t fourcc = to_drm_fourcc(format);
     gbm_bo* bo = gbm_bo_create(device, kWidth, kHeight, fourcc, GBM_BO_USE_LINEAR | GBM_BO_USE_RENDERING);
     if (!bo) {
@@ -88,12 +88,13 @@ Made make_frame(gbm_device* device, PixelFormat format, std::uint64_t sequence, 
     handle.drm_fourcc = fourcc;
     handle.drm_modifier = 0;  // DRM_FORMAT_MOD_LINEAR
     handle.has_drm_modifier = true;
+    handle.lifetime = std::move(lifetime);
     FrameMetadata metadata;
     metadata.sequence = sequence;
 
     Made made;
-    made.gpu = std::make_unique<GpuFrame>(kWidth, kHeight, format, MemoryKind::DmaBuf, std::move(handle), default_planes(format, kWidth, kHeight, stride), metadata);
-    made.cpu = std::make_unique<CpuFrame>(kWidth, kHeight, format, std::move(shadow), stride, metadata);
+    made.gpu = std::make_shared<GpuFrame>(kWidth, kHeight, format, MemoryKind::DmaBuf, std::move(handle), default_planes(format, kWidth, kHeight, stride), metadata);
+    made.cpu = std::make_shared<CpuFrame>(kWidth, kHeight, format, std::move(shadow), stride, metadata);
     return made;
 }
 
@@ -128,7 +129,7 @@ void run_format(gbm_device* device, const std::shared_ptr<capturer::gpu::VulkanR
     }
 
     // First frame: everything changed.
-    auto r0 = gpu.process(nullptr, *a.gpu);
+    auto r0 = gpu.process(nullptr, a.gpu);
     CHECK(!r0->skipped());
     CHECK(r0->location() == ResultLocation::Gpu);
     CHECK(r0->tile_diff().width == 3 && r0->tile_diff().height == 3);
@@ -136,36 +137,55 @@ void run_format(gbm_device* device, const std::shared_ptr<capturer::gpu::VulkanR
 
     // Identical content in a different buffer: nothing changed.
     Made b = make_frame(device, format, 2, base);
-    auto r1 = gpu.process(a.gpu.get(), *b.gpu);
+    auto r1 = gpu.process(a.gpu, b.gpu);
     for (bool changed : flags(*r1)) CHECK(!changed);
 
     // One pixel in tile (1,1) changes; compare with the CPU processor.
     Made c = make_frame(device, format, 3, with_change(20, 20, 1));
-    auto r2 = gpu.process(b.gpu.get(), *c.gpu);
-    auto expected = cpu.process(b.cpu.get(), *c.cpu);
+    auto r2 = gpu.process(b.gpu, c.gpu);
+    auto expected = cpu.process(b.cpu, c.cpu);
     CHECK(flags(*r2) == flags(*expected));
     CHECK(flags(*r2)[1 * 3 + 1]);
 
     // The last pixel lies in a partial edge tile.
     Made d = make_frame(device, format, 4, with_change(kWidth - 1, kHeight - 1, 2));
-    auto r3 = gpu.process(c.gpu.get(), *d.gpu);
-    auto expected3 = cpu.process(c.cpu.get(), *d.cpu);
+    auto r3 = gpu.process(c.gpu, d.gpu);
+    auto expected3 = cpu.process(c.cpu, d.cpu);
     CHECK(flags(*r3) == flags(*expected3));
     CHECK(flags(*r3)[2 * 3 + 2]);
 
     // Against d, e differs in the corner tile (reverted) and, in the alpha byte only, in tile (0,0).
     // The padding byte of X formats is ignored; alpha of alpha formats is not.
     Made e = make_frame(device, format, 5, with_change(5, 5, 3));
-    auto r4 = gpu.process(d.gpu.get(), *e.gpu);
+    auto r4 = gpu.process(d.gpu, e.gpu);
     const std::vector<bool> result4 = flags(*r4);
     CHECK(result4[2 * 3 + 2]);
     CHECK(result4[0] == describe(format).has_alpha);
 
-    // A previous frame that is not the last processed one restarts the comparison.
-    auto r5 = gpu.process(a.gpu.get(), *e.gpu);
-    for (bool changed : flags(*r5)) CHECK(changed);
-    auto r6 = gpu.process(nullptr, *e.gpu);
+    // Any live frame is a valid previous frame, not only the last one processed.
+    auto r5 = gpu.process(a.gpu, e.gpu);
+    auto expected5 = cpu.process(a.cpu, e.cpu);
+    // Only the alpha/padding byte of tile (0,0) differs between a and e, and the GPU ignores padding.
+    const auto adjust = [&](std::vector<bool> want) {
+        if (!describe(format).has_alpha) want[0] = false;
+        return want;
+    };
+    CHECK(flags(*r5) == adjust(flags(*expected5)));
+    // Reusing the cached import and a cold import must agree.
+    auto r5b = gpu.process(c.gpu, e.gpu);
+    CHECK(flags(*r5b) == adjust(flags(*cpu.process(c.cpu, e.cpu))));
+    auto r6 = gpu.process(nullptr, e.gpu);
     for (bool changed : flags(*r6)) CHECK(changed);
+
+    // A pending result keeps both frames, and so their producer buffers, alive until it is destroyed.
+    auto lease = std::make_shared<int>(0);
+    Made f = make_frame(device, format, 6, base, lease);
+    std::weak_ptr<const IFrameInfo> weak_f = f.gpu;
+    auto pending = gpu.process(e.gpu, f.gpu);
+    f.gpu.reset();
+    CHECK(!weak_f.expired() && lease.use_count() == 2);
+    pending.reset();
+    CHECK(weak_f.expired() && lease.use_count() == 1);
 }
 
 }  // namespace

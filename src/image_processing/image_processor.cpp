@@ -44,7 +44,7 @@ const char* to_string(ProcessorBackend backend) {
     return "unknown";
 }
 
-std::unique_ptr<IProcessResult> NullImageProcessor::process(const frame::IFrameInfo*, const frame::IFrameInfo&) {
+std::unique_ptr<IProcessResult> NullImageProcessor::process(const frame::FramePtr&, const frame::FramePtr&) {
     return std::make_unique<SkippedResult>();
 }
 
@@ -54,10 +54,12 @@ CpuTileDifferenceProcessor::CpuTileDifferenceProcessor(std::size_t tile_size) : 
     }
 }
 
-std::unique_ptr<IProcessResult> CpuTileDifferenceProcessor::process(const frame::IFrameInfo* previous, const frame::IFrameInfo& current) {
-    if (!can_process(current)) {
+std::unique_ptr<IProcessResult> CpuTileDifferenceProcessor::process(const frame::FramePtr& previous_frame, const frame::FramePtr& current_frame) {
+    if (!current_frame || !can_process(*current_frame)) {
         throw std::invalid_argument("CpuTileDifferenceProcessor cannot process this frame");
     }
+    const frame::IFrameInfo& current = *current_frame;
+    const frame::IFrameInfo* previous = previous_frame.get();
     if (!previous || !same_layout(*previous, current)) {
         return std::make_unique<CpuResult>(all_tiles_changed(current.width(), current.height(), tile_size_));
     }
@@ -95,8 +97,11 @@ IImageProcessor& ImageProcessorDispatcher::select(const frame::IFrameInfo& frame
     return null_processor_;
 }
 
-std::unique_ptr<IProcessResult> ImageProcessorDispatcher::process(const frame::IFrameInfo* previous, const frame::IFrameInfo& current) {
-    IImageProcessor& processor = select(current);
+std::unique_ptr<IProcessResult> ImageProcessorDispatcher::process(const frame::FramePtr& previous, const frame::FramePtr& current) {
+    if (!current) {
+        throw std::invalid_argument("current frame must not be null");
+    }
+    IImageProcessor& processor = select(*current);
     selected_name_ = processor.name();
     selected_backend_ = processor.backend();
     fell_back_ = &processor == &null_processor_ && !processors_.empty();

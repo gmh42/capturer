@@ -21,6 +21,8 @@ void release_dma_buf(capturer::sample::DesktopFrame& frame) {
         close(frame.dma_buf_fd);
         frame.dma_buf_fd = -1;
     }
+    // Returns the producer's buffer to the compositor.
+    frame.buffer_lease.reset();
 }
 
 void print_intervals(const char* label, std::vector<double> intervals_ms) {

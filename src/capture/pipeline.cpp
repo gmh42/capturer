@@ -87,7 +87,7 @@ CaptureResult CapturePipeline::process_frame() {
     constexpr std::size_t height = 64;
 
     auto current = backend_->capture_frame(width, height);
-    std::shared_ptr<capturer::image_processing::IProcessResult> result = processor_.process(previous_frame_.get(), *current);
+    std::shared_ptr<capturer::image_processing::IProcessResult> result = processor_.process(previous_frame_, current);
     previous_frame_ = current;
 
     return CaptureResult{processor_.selected_name(), processor_.selected_backend(), std::move(current), std::move(result)};

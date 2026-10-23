@@ -37,6 +37,9 @@ struct DesktopFrame {
     bool has_header = false;
     std::uint64_t sequence = 0;
     std::int64_t pts_ns = 0;
+    // Reserves the producer's buffer while a dma-buf frame is in use. Moved into the GpuFrame by to_frame_info();
+    // releasing the last reference returns the buffer to the compositor. Null for frames copied to CPU memory.
+    std::shared_ptr<void> buffer_lease;
 
     bool has_dma_buf() const { return dma_buf_fd >= 0; }
 };
