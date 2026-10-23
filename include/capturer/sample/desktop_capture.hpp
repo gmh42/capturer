@@ -59,8 +59,6 @@ struct PipeWireDesktopCaptureConfig {
     std::shared_ptr<void> portal_connection;
     std::size_t width = 1920;
     std::size_t height = 1080;
-    std::uint32_t framerate_numerator = 60;
-    std::uint32_t framerate_denominator = 1;
     bool allow_dma_buf = true;
 };
 
@@ -72,6 +70,8 @@ public:
     std::string name() const override;
     DesktopFrame capture() override;
     std::optional<DesktopFrame> try_capture(std::chrono::milliseconds timeout);
+    // Producer frame-rate ceiling from format negotiation (0 until negotiated).
+    double negotiated_max_framerate() const;
 
 private:
     struct Impl;

@@ -143,8 +143,8 @@ struct PipeWireDesktopCaptureSource::Impl {
             static_cast<std::uint32_t>(config.height)};
         const spa_rectangle minimum_size{1, 1};
         const spa_rectangle maximum_size{kMaximumCaptureDimension, kMaximumCaptureDimension};
-        const spa_fraction preferred_max_framerate{config.framerate_numerator, config.framerate_denominator};
         const spa_fraction minimum_max_framerate{1, 1};
+        // Prefer the highest rate so the producer's ceiling (normally the display refresh rate) decides.
         const spa_fraction maximum_max_framerate{kMaximumCaptureFrameRate, 1};
 
         spa_pod_frame object_frame;
@@ -164,7 +164,7 @@ struct PipeWireDesktopCaptureSource::Impl {
             SPA_FORMAT_VIDEO_size,
             SPA_POD_CHOICE_RANGE_Rectangle(&preferred_size, &minimum_size, &maximum_size),
             SPA_FORMAT_VIDEO_maxFramerate,
-            SPA_POD_CHOICE_RANGE_Fraction(&preferred_max_framerate, &minimum_max_framerate, &maximum_max_framerate),
+            SPA_POD_CHOICE_RANGE_Fraction(&maximum_max_framerate, &minimum_max_framerate, &maximum_max_framerate),
             0);
         if (with_modifier) {
             // The first choice entry is the default; the rest are the alternatives.
@@ -304,11 +304,14 @@ struct PipeWireDesktopCaptureSource::Impl {
         }
 
         struct spa_video_info info{};
-        if (spa_format_video_parse(param, &info) != 0 || info.media_subtype != SPA_MEDIA_SUBTYPE_raw) {
+        if (spa_format_video_parse(param, &info) < 0 || info.media_subtype != SPA_MEDIA_SUBTYPE_raw) {
             return;
         }
         self->config.width = std::max<std::size_t>(1, info.info.raw.size.width);
         self->config.height = std::max<std::size_t>(1, info.info.raw.size.height);
+        // framerate is 0/1 for variable-rate streams, where max_framerate holds the ceiling instead.
+        const spa_fraction fixed_rate = info.info.raw.framerate;
+        self->negotiated_max_framerate = fixed_rate.num != 0 ? fixed_rate : info.info.raw.max_framerate;
 
         // A modifier in the negotiated format means the producer chose dma-buf.
         const bool use_dma_buf = spa_pod_find_prop(param, nullptr, SPA_FORMAT_VIDEO_modifier) != nullptr;
@@ -336,6 +339,7 @@ struct PipeWireDesktopCaptureSource::Impl {
     struct spa_hook listener{};
     DesktopFrame captured_frame{};
     std::string stream_error;
+    spa_fraction negotiated_max_framerate{0, 1};
     bool frame_ready = false;
     bool pipewire_initialized = false;
 
@@ -370,6 +374,11 @@ DesktopFrame PipeWireDesktopCaptureSource::capture() {
         throw std::runtime_error("timed out waiting for PipeWire frame");
     }
     return std::move(*frame);
+}
+
+double PipeWireDesktopCaptureSource::negotiated_max_framerate() const {
+    const spa_fraction rate = impl_->negotiated_max_framerate;
+    return rate.denom == 0 ? 0.0 : static_cast<double>(rate.num) / static_cast<double>(rate.denom);
 }
 
 std::optional<DesktopFrame> PipeWireDesktopCaptureSource::try_capture(std::chrono::milliseconds timeout) {

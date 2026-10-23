@@ -31,7 +31,8 @@ int main() {
 
         auto warmup_frame = capture_source.capture();
         std::cout << "warm-up frame received: " << warmup_frame.width << 'x' << warmup_frame.height
-                  << " (" << (warmup_frame.has_dma_buf() ? "dma-buf" : "cpu-memory") << ")\n";
+                  << " (" << (warmup_frame.has_dma_buf() ? "dma-buf" : "cpu-memory") << "), negotiated max fps: "
+                  << capture_source.negotiated_max_framerate() << '\n';
         release_dma_buf(warmup_frame);
 
         constexpr auto benchmark_duration = std::chrono::seconds(3);
