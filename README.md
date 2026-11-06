@@ -8,6 +8,7 @@ A CMake-based C++ prototype for a desktop capture pipeline that is designed to s
 - downstream processing through an interchangeable image processor interface (`IImageProcessor`)
 - a tile-difference processor for change detection on 16x16 blocks
 - an X11 sample application that captures the desktop and feeds the frames to the diff pipeline
+- an optional SDL2 tile-difference viewer for live CPU or Vulkan processing
 - an optional PipeWire stream source that preserves dma-buf frames for Wayland zero-copy integration
 
 ## Structure
@@ -60,3 +61,31 @@ ctest --test-dir build --output-on-failure
 # Wayland path: the sample opens the desktop portal and asks you to select a monitor
 ./build/capturer_sample
 ```
+
+### Live tile viewer
+
+Install the SDL2 development package (e.g. `libsdl2-dev` on Debian/Ubuntu) before configuring.
+When SDL2 is available, CMake builds `capturer_diff_viewer`:
+
+```bash
+./build/capturer_diff_viewer                          # select source and processor automatically
+./build/capturer_diff_viewer --backend=cpu            # request CPU frames
+./build/capturer_diff_viewer --backend=vulkan         # require Vulkan dma-buf frames
+./build/capturer_diff_viewer --source=x11 --backend=cpu
+```
+
+The window shows one 4x4 red square for each changed 16x16 source tile, and black for unchanged
+tiles. The first frame is entirely red. Close the window or press Escape to exit. If the window
+itself is captured, its updates may also cause changes in the display.
+
+Automatic source selection uses the Wayland screen-cast portal when `WAYLAND_DISPLAY` is set,
+otherwise X11; `--source=wayland` explicitly requests the portal. The portal asks you to select a
+screen. CPU mode requests CPU buffers; Vulkan requires compatible single-plane dma-bufs, a Vulkan
+device and the shader compiler at build time. X11 capture supplies CPU frames only. Automatic mode
+selects a processor for the received memory type without copying; unsupported frames produce an
+error rather than silently switching modes. PipeWire support is required for Wayland capture.
+X11 root-window capture may not work through XWayland; use the portal source in a Wayland session.
+
+SDL is used only to display the backend-neutral tile result, leaving capture, processing, and the
+display separate. This is a regular opaque window, not a desktop overlay. Transparent, click-through
+overlays would need additional platform/compositor-specific work (especially on Wayland).

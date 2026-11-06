@@ -258,7 +258,7 @@ struct PipeWireDesktopCaptureSource::Impl {
                 pw_loop_leave(event_loop);
                 throw std::runtime_error("PipeWire loop iteration failed");
             }
-            if (std::chrono::steady_clock::now() >= deadline) {
+            if (!frame_ready && std::chrono::steady_clock::now() >= deadline) {
                 pw_loop_leave(event_loop);
                 return std::nullopt;
             }

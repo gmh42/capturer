@@ -116,6 +116,34 @@ endif()
 
 target_link_libraries(capturer_sample PRIVATE capturer_core X11::X11 PkgConfig::GIO)
 
+pkg_check_modules(SDL2 QUIET IMPORTED_TARGET sdl2)
+if(SDL2_FOUND)
+    add_executable(capturer_diff_viewer
+        src/capture/x11_desktop_capture.cpp
+        src/sample/diff_viewer.cpp
+        src/sample/diff_viewer_render.cpp
+        src/sample/frame_adapter.cpp
+        src/sample/wayland_portal_capture.cpp
+    )
+    if(PIPEWIRE_INCLUDE_DIR AND PIPEWIRE_LIBRARY)
+        target_sources(capturer_diff_viewer PRIVATE src/sample/pipewire_desktop_capture.cpp)
+        target_link_libraries(capturer_diff_viewer PRIVATE ${PIPEWIRE_LIBRARY})
+    endif()
+    target_link_libraries(capturer_diff_viewer PRIVATE capturer_core X11::X11 PkgConfig::GIO PkgConfig::SDL2)
+
+    if(BUILD_TESTING)
+        add_executable(capturer_diff_viewer_tests
+            tests/test_diff_viewer_render.cpp
+            src/sample/diff_viewer_render.cpp
+        )
+        target_include_directories(capturer_diff_viewer_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        target_link_libraries(capturer_diff_viewer_tests PRIVATE capturer_core PkgConfig::SDL2)
+        add_test(NAME diff_viewer_tests COMMAND capturer_diff_viewer_tests)
+    endif()
+else()
+    message(STATUS "SDL2 development files not found: capturer_diff_viewer will not be built")
+endif()
+
 add_executable(capturer_pipewire_benchmark
     src/sample/pipewire_capture_benchmark.cpp
     src/sample/wayland_portal_capture.cpp
