@@ -160,7 +160,7 @@ if(PIPEWIRE_INCLUDE_DIR AND PIPEWIRE_LIBRARY)
     target_link_libraries(capturer_pipewire_benchmark PRIVATE ${PIPEWIRE_LIBRARY})
 endif()
 
-target_link_libraries(capturer_pipewire_benchmark PRIVATE PkgConfig::GIO)
+target_link_libraries(capturer_pipewire_benchmark PRIVATE capturer_core PkgConfig::GIO)
 
 if(BUILD_TESTING)
     add_test(NAME tile_difference_tests COMMAND capturer_tests)

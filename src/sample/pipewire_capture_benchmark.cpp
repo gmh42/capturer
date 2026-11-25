@@ -2,6 +2,8 @@
 
 #if HAVE_PIPEWIRE
 
+#include "capturer/gpu/vulkan_runtime.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -56,6 +58,18 @@ void run_benchmark(bool allow_dma_buf) {
         std::cout << "opening desktop capture portal..." << std::endl;
         auto config = capturer::sample::open_wayland_portal_capture();
         config.allow_dma_buf = allow_dma_buf;
+        if (allow_dma_buf) {
+            // Offer the modifiers the GPU can import; some drivers only allocate with tiled modifiers.
+            capturer::gpu::VulkanRuntime runtime;
+            config.dma_buf_formats = capturer::sample::query_dma_buf_formats(runtime);
+            for (const auto& offered : config.dma_buf_formats) {
+                std::cout << "offering " << offered.modifiers.size() << " modifiers for format "
+                          << capturer::frame::to_string(offered.format) << '\n';
+            }
+            if (config.dma_buf_formats.empty()) {
+                std::cout << "Vulkan reports no importable dma-buf formats; offering default modifiers\n";
+            }
+        }
         std::cout << "portal capture configured; connecting PipeWire stream..." << std::endl;
         capturer::sample::PipeWireDesktopCaptureSource capture_source(std::move(config));
         std::cout << "PipeWire stream connected; capturing warm-up frame..." << std::endl;
@@ -64,6 +78,9 @@ void run_benchmark(bool allow_dma_buf) {
         std::cout << "warm-up frame received: " << warmup_frame.width << 'x' << warmup_frame.height
                   << " (" << (warmup_frame.has_dma_buf() ? "dma-buf" : "cpu-memory") << "), negotiated max fps: "
                   << capture_source.negotiated_max_framerate() << '\n';
+        if (warmup_frame.has_dma_buf()) {
+            std::cout << "dma-buf modifier: 0x" << std::hex << warmup_frame.drm_modifier << std::dec << '\n';
+        }
         release_dma_buf(warmup_frame);
 
         constexpr auto benchmark_duration = std::chrono::seconds(3);

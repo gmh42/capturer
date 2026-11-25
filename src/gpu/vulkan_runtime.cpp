@@ -321,7 +321,9 @@ std::shared_ptr<GpuBuffer> VulkanRuntime::create_dma_buf_image(int width, int he
     const int stride = width * 4;
     const int fd = drmPrimeHandleToFD(0, 0, 0, 0);
     (void)fd;
-    const auto gbm_bo = gbm_bo_create(gbm_device_, width, height, GBM_FORMAT_XRGB8888, GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+    // Linear is requested as a modifier because NVIDIA's GBM rejects GBM_BO_USE_LINEAR with GBM_BO_USE_RENDERING.
+    const std::uint64_t linear = DRM_FORMAT_MOD_LINEAR;
+    const auto gbm_bo = gbm_bo_create_with_modifiers(gbm_device_, width, height, GBM_FORMAT_XRGB8888, &linear, 1);
     if (!gbm_bo) {
         return nullptr;
     }
@@ -502,6 +504,28 @@ bool VulkanRuntime::can_import_dma_buf(VkFormat format, std::uint64_t modifier, 
         return no("dma-buf import not allowed for this image format");
     }
     return true;
+}
+
+std::vector<std::uint64_t> VulkanRuntime::importable_dma_buf_modifiers(VkFormat format, VkImageUsageFlags usage) const {
+    std::vector<std::uint64_t> result;
+    if (!initialized_ || !dma_buf_import_supported_ || format == VK_FORMAT_UNDEFINED) {
+        return result;
+    }
+    VkDrmFormatModifierPropertiesListEXT list{};
+    list.sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT;
+    VkFormatProperties2 props{};
+    props.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+    props.pNext = &list;
+    vkGetPhysicalDeviceFormatProperties2(physical_device_, format, &props);
+    std::vector<VkDrmFormatModifierPropertiesEXT> modifiers(list.drmFormatModifierCount);
+    list.pDrmFormatModifierProperties = modifiers.data();
+    vkGetPhysicalDeviceFormatProperties2(physical_device_, format, &props);
+    for (const auto& m : modifiers) {
+        if (m.drmFormatModifierPlaneCount == 1 && can_import_dma_buf(format, m.drmFormatModifier, usage)) {
+            result.push_back(m.drmFormatModifier);
+        }
+    }
+    return result;
 }
 
 std::shared_ptr<GpuImage> VulkanRuntime::import_dma_buf_image(const frame::IFrameInfo& frame, VkImageUsageFlags usage) {

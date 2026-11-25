@@ -14,6 +14,10 @@
 #define HAVE_PIPEWIRE 0
 #endif
 
+namespace capturer::gpu {
+class VulkanRuntime;
+}
+
 namespace capturer::sample {
 
 enum class FrameStorage {
@@ -70,6 +74,12 @@ private:
 
 #if HAVE_PIPEWIRE
 
+// Modifiers a consumer can import for one pixel format.
+struct DmaBufFormat {
+    capturer::frame::PixelFormat format = capturer::frame::PixelFormat::Unknown;
+    std::vector<std::uint64_t> modifiers;
+};
+
 struct PipeWireDesktopCaptureConfig {
     std::string stream_name = "capturer-pipewire";
     int pipewire_fd = -1;
@@ -78,6 +88,9 @@ struct PipeWireDesktopCaptureConfig {
     std::size_t width = 1920;
     std::size_t height = 1080;
     bool allow_dma_buf = true;
+    // Formats and modifiers offered for dma-buf capture. Drivers such as NVIDIA's only allocate with explicit
+    // tiled modifiers, so offer what the consumer's GPU can import. Empty offers LINEAR and implicit modifiers.
+    std::vector<DmaBufFormat> dma_buf_formats;
 };
 
 class PipeWireDesktopCaptureSource final : public DesktopCaptureSource {
@@ -97,6 +110,10 @@ private:
 };
 
 PipeWireDesktopCaptureConfig open_wayland_portal_capture();
+
+// The dma-buf formats and modifiers the runtime's device can import as sampled images.
+// Initializes the runtime; empty when the device cannot import dma-bufs.
+std::vector<DmaBufFormat> query_dma_buf_formats(capturer::gpu::VulkanRuntime& runtime);
 
 #endif
 

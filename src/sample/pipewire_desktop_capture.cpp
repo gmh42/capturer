@@ -2,6 +2,8 @@
 
 #if HAVE_PIPEWIRE
 
+#include "capturer/gpu/vulkan_runtime.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -73,7 +75,41 @@ capturer::frame::PixelFormat to_pixel_format(spa_video_format format) {
     }
 }
 
+spa_video_format to_spa_format(capturer::frame::PixelFormat format) {
+    switch (format) {
+    case capturer::frame::PixelFormat::RGBA8: return SPA_VIDEO_FORMAT_RGBA;
+    case capturer::frame::PixelFormat::BGRA8: return SPA_VIDEO_FORMAT_BGRA;
+    case capturer::frame::PixelFormat::RGBX8: return SPA_VIDEO_FORMAT_RGBx;
+    case capturer::frame::PixelFormat::BGRX8: return SPA_VIDEO_FORMAT_BGRx;
+    default: return SPA_VIDEO_FORMAT_UNKNOWN;
+    }
+}
+
+// The RGB formats the capture accepts; the first is the default.
+const std::vector<spa_video_format> kOfferedFormats = {
+    SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_RGBx};
+
+struct FormatOffer {
+    std::vector<spa_video_format> formats;
+    std::vector<std::uint64_t> modifiers;
+};
+
 }  // namespace
+
+std::vector<DmaBufFormat> query_dma_buf_formats(capturer::gpu::VulkanRuntime& runtime) {
+    std::vector<DmaBufFormat> result;
+    if (!runtime.initialize() || !runtime.supports_dma_buf_import()) {
+        return result;
+    }
+    for (const spa_video_format spa_format : kOfferedFormats) {
+        const auto format = to_pixel_format(spa_format);
+        auto modifiers = runtime.importable_dma_buf_modifiers(capturer::gpu::VulkanRuntime::to_vk_format(format));
+        if (!modifiers.empty()) {
+            result.push_back({format, std::move(modifiers)});
+        }
+    }
+    return result;
+}
 
 struct PipeWireDesktopCaptureSource::Impl {
     explicit Impl(PipeWireDesktopCaptureConfig config_in)
@@ -119,14 +155,30 @@ struct PipeWireDesktopCaptureSource::Impl {
 
         pw_stream_add_listener(stream, &listener, &stream_events, this);
 
-        std::uint8_t pod_buffer[4096];
-        spa_pod_builder pod_builder = SPA_POD_BUILDER_INIT(pod_buffer, sizeof(pod_buffer));
-        const spa_pod* params[2];
-        std::uint32_t param_count = 0;
+        std::vector<FormatOffer> offers;
         if (dma_buf_supported()) {
-            params[param_count++] = build_format(pod_builder, true);
+            if (config.dma_buf_formats.empty()) {
+                offers.push_back({kOfferedFormats, {DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_MOD_INVALID}});
+            }
+            for (const DmaBufFormat& offered : config.dma_buf_formats) {
+                const spa_video_format format = to_spa_format(offered.format);
+                if (format != SPA_VIDEO_FORMAT_UNKNOWN && !offered.modifiers.empty()) {
+                    offers.push_back({{format}, offered.modifiers});
+                }
+            }
         }
-        params[param_count++] = build_format(pod_builder, false);
+        // The pod builder cannot grow, so size it for every offer plus the CPU fallback.
+        std::size_t pod_capacity = 1024;
+        for (const FormatOffer& offer : offers) {
+            pod_capacity += 1024 + offer.modifiers.size() * sizeof(std::uint64_t) * 2;
+        }
+        std::vector<std::uint8_t> pod_buffer(pod_capacity);
+        spa_pod_builder pod_builder = SPA_POD_BUILDER_INIT(pod_buffer.data(), static_cast<std::uint32_t>(pod_buffer.size()));
+        std::vector<const spa_pod*> params;
+        for (const FormatOffer& offer : offers) {
+            params.push_back(build_format(pod_builder, offer.formats, &offer.modifiers));
+        }
+        params.push_back(build_format(pod_builder, kOfferedFormats, nullptr));
         if (spa_pod_builder_corrupted(&pod_builder)) {
             throw std::runtime_error("failed to build PipeWire video format parameters");
         }
@@ -136,8 +188,8 @@ struct PipeWireDesktopCaptureSource::Impl {
             PW_DIRECTION_INPUT,
             config.target_node_id,
             static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_DONT_RECONNECT | PW_STREAM_FLAG_MAP_BUFFERS),
-            params,
-            param_count);
+            params.data(),
+            static_cast<std::uint32_t>(params.size()));
         if (connect_result < 0) {
             throw std::runtime_error(make_error_message("failed to connect PipeWire stream", connect_result));
         }
@@ -168,7 +220,12 @@ struct PipeWireDesktopCaptureSource::Impl {
         return found;
     }
 
-    const spa_pod* build_format(spa_pod_builder& builder, bool with_modifier) const {
+    // Offers `formats` (first is the default). With `modifiers` the offer is for dma-buf buffers: the first
+    // modifier is the default and the rest are alternatives.
+    const spa_pod* build_format(
+        spa_pod_builder& builder,
+        const std::vector<spa_video_format>& formats,
+        const std::vector<std::uint64_t>* modifiers) const {
         const spa_rectangle preferred_size{
             static_cast<std::uint32_t>(config.width),
             static_cast<std::uint32_t>(config.height)};
@@ -184,26 +241,27 @@ struct PipeWireDesktopCaptureSource::Impl {
             &builder,
             SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
             SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-            SPA_FORMAT_VIDEO_format,
-            SPA_POD_CHOICE_ENUM_Id(
-                5,
-                SPA_VIDEO_FORMAT_BGRA,
-                SPA_VIDEO_FORMAT_BGRA,
-                SPA_VIDEO_FORMAT_BGRx,
-                SPA_VIDEO_FORMAT_RGBA,
-                SPA_VIDEO_FORMAT_RGBx),
+            0);
+        spa_pod_frame choice_frame;
+        spa_pod_builder_prop(&builder, SPA_FORMAT_VIDEO_format, 0);
+        spa_pod_builder_push_choice(&builder, &choice_frame, SPA_CHOICE_Enum, 0);
+        spa_pod_builder_id(&builder, formats.front());
+        for (const spa_video_format format : formats) {
+            spa_pod_builder_id(&builder, format);
+        }
+        spa_pod_builder_pop(&builder, &choice_frame);
+        spa_pod_builder_add(
+            &builder,
             SPA_FORMAT_VIDEO_size,
             SPA_POD_CHOICE_RANGE_Rectangle(&preferred_size, &minimum_size, &maximum_size),
             SPA_FORMAT_VIDEO_maxFramerate,
             SPA_POD_CHOICE_RANGE_Fraction(&maximum_max_framerate, &minimum_max_framerate, &maximum_max_framerate),
             0);
-        if (with_modifier) {
-            // The first choice entry is the default; the rest are the alternatives.
-            const std::uint64_t modifiers[] = {DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_MOD_INVALID};
-            spa_pod_frame choice_frame;
+        if (modifiers) {
             spa_pod_builder_prop(&builder, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY);
             spa_pod_builder_push_choice(&builder, &choice_frame, SPA_CHOICE_Enum, 0);
-            for (const std::uint64_t modifier : modifiers) {
+            spa_pod_builder_long(&builder, static_cast<std::int64_t>(modifiers->front()));
+            for (const std::uint64_t modifier : *modifiers) {
                 spa_pod_builder_long(&builder, static_cast<std::int64_t>(modifier));
             }
             spa_pod_builder_pop(&builder, &choice_frame);

@@ -85,6 +85,8 @@ public:
     // Checks that `modifier` can be imported for `format` as a single-plane image usable with `usage`.
     // On failure returns false and, when `reason` is given, says why.
     bool can_import_dma_buf(VkFormat format, std::uint64_t modifier, VkImageUsageFlags usage, std::string* reason = nullptr) const;
+    // Every single-plane DRM modifier for which can_import_dma_buf() succeeds. Empty when dma-buf import is unavailable.
+    std::vector<std::uint64_t> importable_dma_buf_modifiers(VkFormat format, VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT) const;
     // Imports the frame's dma-buf as a sampled image. The frame keeps its own fd; the image holds a duplicate.
     // Returns nullptr and sets last_error() on failure. Only single-plane RGB frames with an explicit modifier are supported.
     std::shared_ptr<GpuImage> import_dma_buf_image(const frame::IFrameInfo& frame, VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT);

@@ -53,7 +53,9 @@ frames occupy two distinct producer buffers. CPU frames are copied out and reque
 
 ## Known limitations
 
-- Offered modifiers are fixed to LINEAR + INVALID rather than taken from the Vulkan modifier query.
+- The viewer and benchmark offer the modifiers the Vulkan device reports as importable (`importable_dma_buf_modifiers`),
+  which is what lets NVIDIA's tiled block-linear buffers negotiate. Capture sources configured without
+  `dma_buf_formats` still offer only LINEAR + INVALID, which NVIDIA drivers do not accept.
 - Multi-GPU: the Vulkan device may not be the one that allocated the compositor's buffer; this is not handled.
 - Only single-plane RGB is imported; ARGB8 has no Vulkan mapping and YUV formats are not imported.
 - Live PipeWire behaviour of the lease/buffer-count change is untested (unit tests cover the processor only).

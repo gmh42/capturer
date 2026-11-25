@@ -50,13 +50,17 @@ Options parse_options(int argc, char** argv) {
 
 class Capture {
 public:
-    explicit Capture(const Options& options) {
+    Capture(const Options& options, gpu::VulkanRuntime& runtime) {
         const bool wayland = options.source == Source::Wayland ||
             (options.source == Source::Auto && std::getenv("WAYLAND_DISPLAY") != nullptr);
         if (wayland) {
 #if HAVE_PIPEWIRE
             auto config = sample::open_wayland_portal_capture();
-            config.allow_dma_buf = options.backend != Backend::Cpu;
+            if (options.backend != Backend::Cpu) {
+                // Offer the modifiers this GPU imports; NVIDIA only allocates with explicit tiled modifiers.
+                config.dma_buf_formats = sample::query_dma_buf_formats(runtime);
+            }
+            config.allow_dma_buf = !config.dma_buf_formats.empty();
             pipewire_ = std::make_unique<sample::PipeWireDesktopCaptureSource>(std::move(config));
 #else
             throw std::runtime_error("Wayland capture requires PipeWire support");
@@ -105,8 +109,8 @@ using Window = std::unique_ptr<SDL_Window, decltype(&SDL_DestroyWindow)>;
 using Renderer = std::unique_ptr<SDL_Renderer, decltype(&SDL_DestroyRenderer)>;
 
 void run(const Options& options) {
-    Capture capture(options);
     auto runtime = std::make_shared<gpu::VulkanRuntime>();
+    Capture capture(options, *runtime);
     image_processing::ImageProcessorDispatcher processor;
     if (options.backend != Backend::Cpu) {
         processor.add(std::make_unique<image_processing::VulkanTileDifferenceProcessor>(runtime, kTileSize));

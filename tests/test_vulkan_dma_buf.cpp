@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <gbm.h>
+#include <drm_fourcc.h>
 
 #include "capturer/frame/frame_info.hpp"
 #include "capturer/gpu/vulkan_runtime.hpp"
@@ -50,7 +51,10 @@ struct Made {
 
 Made make_frame(gbm_device* device, PixelFormat format, std::uint64_t sequence, const std::function<Pixel(std::size_t, std::size_t)>& pixel, std::shared_ptr<void> lifetime = {}) {
     const std::uint32_t fourcc = to_drm_fourcc(format);
-    gbm_bo* bo = gbm_bo_create(device, kWidth, kHeight, fourcc, GBM_BO_USE_LINEAR | GBM_BO_USE_RENDERING);
+    // Request the linear modifier explicitly: the test fills the buffer through mmap, and NVIDIA's GBM rejects
+    // GBM_BO_USE_LINEAR combined with GBM_BO_USE_RENDERING.
+    const std::uint64_t linear = DRM_FORMAT_MOD_LINEAR;
+    gbm_bo* bo = gbm_bo_create_with_modifiers(device, kWidth, kHeight, fourcc, &linear, 1);
     if (!bo) {
         std::cerr << "SKIP: gbm_bo_create failed\n";
         std::exit(kSkip);
@@ -86,7 +90,7 @@ Made make_frame(gbm_device* device, PixelFormat format, std::uint64_t sequence, 
     GpuHandle handle;
     handle.fds.push_back(fd);
     handle.drm_fourcc = fourcc;
-    handle.drm_modifier = 0;  // DRM_FORMAT_MOD_LINEAR
+    handle.drm_modifier = DRM_FORMAT_MOD_LINEAR;
     handle.has_drm_modifier = true;
     handle.lifetime = std::move(lifetime);
     FrameMetadata metadata;
@@ -127,6 +131,10 @@ void run_format(gbm_device* device, const std::shared_ptr<capturer::gpu::VulkanR
         std::cerr << "SKIP: device cannot import this dma-buf\n";
         std::exit(kSkip);
     }
+
+    // The advertised modifier list must include the modifier of a buffer the device just accepted.
+    const auto modifiers = runtime->importable_dma_buf_modifiers(capturer::gpu::VulkanRuntime::to_vk_format(format));
+    CHECK(std::find(modifiers.begin(), modifiers.end(), DRM_FORMAT_MOD_LINEAR) != modifiers.end());
 
     // First frame: everything changed.
     auto r0 = gpu.process(nullptr, a.gpu);
